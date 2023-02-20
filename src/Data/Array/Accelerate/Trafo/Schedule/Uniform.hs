@@ -14,6 +14,7 @@
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
+--{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -72,15 +73,24 @@ import System.IO.Unsafe (unsafePerformIO)
 import Data.Array.Accelerate.Pretty.Operation
 import Data.Functor.Identity
 
+import Debug.Trace
+import Data.Array.Accelerate.Pretty
+import qualified Data.Array.Accelerate.Pretty.Print as Pr
+import Data.Array.Accelerate.Pretty.Schedule.Uniform
+import Data.Array.Accelerate.AST.Exp
+
 instance IsSchedule UniformScheduleFun where
   type ScheduleInput  UniformScheduleFun a = Input a
   type ScheduleOutput UniformScheduleFun a = Output a
 
-  convertScheduleFun afun
-    | (partial, _) <- partialScheduleFun afun
-    = stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
-    $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv
-    $ fromPartialFun PEnd (ReusedVars IdxSet.empty) partial
+  -- convertScheduleFun afun
+  --   | (partial, _) <- partialScheduleFun afun
+  --   = traceShow afun $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
+  --   $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv
+  --   $ fromPartialFun PEnd (ReusedVars IdxSet.empty) partial
+
+  convertScheduleFun = convertScheduleFun'
+
 
   rnfSchedule (Slam lhs s) = rnfLeftHandSide rnfBaseR lhs `seq` rnfSchedule s
   rnfSchedule (Sbody s) = rnfSchedule' s
@@ -131,6 +141,111 @@ instance IsSchedule UniformScheduleFun where
             writeIORef ref value
             putMVar mvar ()
           return (Signal mvar, Ref ref)
+
+-- A recursice Show instance for PreOpenAcc
+instance Show (C.PreOpenAcc op env a) where
+  show (C.Exec op args) = "Exec "
+  show (C.Return a) = "Return " 
+  show (C.Compute e) = "Compute (" ++ show e ++ ")" 
+  show (C.Alet lhs u a b) = "Alet (" ++ show a ++ ") (" ++ show b ++ ")"
+  show (C.Alloc sh e n) = "Alloc (" ++ show e ++ ")"
+  show (C.Use e n b) = "Use (" ++ show e ++ ") (" ++ show n ++ ")"
+  show (C.Unit e) = "Unit "
+  show (C.Acond e a b) = "Acond (" ++ show a ++ ") (" ++ show b ++ ")"
+  show (C.Awhile u a b c) = "Awhile (" ++ show a ++ ") (" ++ show b ++ ")"
+
+instance Show (C.PreOpenAfun op env a) where
+  show (C.Abody a) = "Abody (" ++ show a ++ ")"
+  show (C.Alam lhs a) = "Alam (" ++ show a ++ ")"
+
+instance Show (PreOpenFun arr env t) where
+  show (Body e) = "Body (" ++ show e ++ ")"
+  show (Lam lhs f) = "Lam (" ++ show f ++ ")"
+
+instance Show (PreOpenExp arr env t) where
+  show (Let lhs e1 e2) = "Let (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show (Evar v) = "Evar "
+  show (Foreign _ _ f e) = "Foreign (" ++ show f ++ ") (" ++ show e ++ ")"
+  show (Pair e1 e2) = "Pair (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show Nil = "Nil"
+  show (VecPack _ e) = "VecPack (" ++ show e ++ ")"
+  show (VecUnpack _ e) = "VecUnpack (" ++ show e ++ ")"
+  show (IndexSlice slix e1 e2) = "IndexSlice (" ++ show slix ++ ") (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show (IndexFull slix e1 e2) = "IndexFull (" ++ show slix ++ ") (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show (ToIndex _ e1 e2) = "ToIndex (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show (FromIndex _ e1 e2) = "FromIndex (" ++ show e1 ++ ") (" ++ show e2 ++ ")"
+  show (Case e1 e2 e3) = "Case (" ++ show e1 ++ ") (" ++ show e2 ++ ") (" ++ show e3 ++ ")"
+  show (Cond e1 e2 e3) = "Cond (" ++ show e1 ++ ") (" ++ show e2 ++ ") (" ++ show e3 ++ ")"
+  show (While e1 e2 e3) = "While (" ++ show e1 ++ ") (" ++ show e2 ++ ") (" ++ show e3 ++ ")"
+  show (Const _ e) = "Const "
+  show (PrimConst e) = "PrimConst "
+  show (PrimApp e1 e2) = "PrimApp (" ++ show e2 ++ ")"
+  show (ArrayInstr _ e) = "ArrayInstr (" ++ show e ++ ")"
+  show (ShapeSize _ e) = "ShapeSize (" ++ show e ++ ")"
+  show (Undef _) = "Undef"
+  show (Coerce _ _ e) = "Coerce (" ++ show e ++ ")"
+
+convertScheduleFun' :: IsKernel kernel => C.PartitionedAfun (KernelOperation kernel) env t -> UniformScheduleFun kernel env (Scheduled UniformScheduleFun t)
+convertScheduleFun' = \case
+  C.Abody a
+    | grounds <- groundsR a
+    , Refl <- (reprIsBody @UniformScheduleFun grounds)
+    , DeclareVars lhs sub value <- declareVars $ outputR grounds
+    -> Slam lhs $ Sbody $ convertScheduleAcc (value weakenId) (weaken sub a)
+  C.Alam lhs f -> Slam (convertLHSInput lhs) (convertScheduleFun' f)
+
+convertScheduleAcc :: IsKernel kernel => BaseVars env (Output t) -> C.PreOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env
+convertScheduleAcc _ (C.Exec op args) = undefined
+convertScheduleAcc value (C.Return vs) = writeReturn value vs Return
+convertScheduleAcc _ (C.Compute e) = undefined
+convertScheduleAcc value (C.Alet lhs u a1 a2) = convertLet value (C.Alet lhs u a1 a2)
+convertScheduleAcc _ (C.Alloc sh e n) = undefined
+convertScheduleAcc _ (C.Use e n b) =  undefined
+convertScheduleAcc _ (C.Unit e) =  undefined
+convertScheduleAcc _ (C.Acond e a1 a2) = undefined
+convertScheduleAcc _ (C.Awhile u a1 a2 a3) = undefined
+
+
+convertLet :: IsKernel kernel => BaseVars env (Output t) -> C.PreOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env
+convertLet value (C.Alet lhs u (C.Exec op args) a) | Exists env <- convertEnvFromList $ map (foldr1 combineMod') $ groupBy (\(Exists v1) (Exists v2) -> isJust $ matchIdx (varIdx v1) (varIdx v2)) $ argsVars args -- TODO: Remove duplicates more efficiently
+                                                  , Reads reEnv k inputBindings <- readRefs $ convertEnvRefs env
+                                                  , Just args' <- reindexArgs (reEnvIdx' reEnv) args
+                                                  , Just Refl <- leftHandSideIsVoid lhs
+                                                  , CompiledKernel kern sargs <- compileKernel' op args
+                                                  , DefineOutput doOutput _ varsOut <- defineOutput (groundsR (C.Exec op args)) u
+                                                    = Effect (Exec (kernelMetadata kern) kern sargs) (convertScheduleAcc value a) --(writeReturn value vs Return)--(writeReturn (weakenVars (weakenWithLHS lhs) value) vs Return) --(convertScheduleAcc value (C.Return vs)) --(Effect (RefWrite undefined undefined) Return) --(Alet LeftHandSideUnit undefined (convertScheduleAcc a2))
+                                                  where
+                                                    combineMod' :: Exists (Var AccessGroundR env) -> Exists (Var AccessGroundR env) -> Exists (Var AccessGroundR env)
+                                                    combineMod' (Exists (Var (AccessGroundRbuffer m1 tp) ix)) var@(Exists (Var (AccessGroundRbuffer m2 _) _))
+                                                      | Exists' m <- combineMod m1 m2 = Exists $ Var (AccessGroundRbuffer m tp) ix
+                                                      | otherwise = var
+                                                    combineMod' a _ = a -- Nothing has to be done when combining two scalars; they don't have access modifiers
+
+-- convertLet value (C.Alet lhs u (C.Awhile u1 a1 a2 vs) a) = let (io, vs') = _
+--                                                             in
+--                                                             Alet (Awhile io _ vs' Return) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a)
+
+convertLet value (C.Alet lhs u a1 a2) = Alet (mapLeftHandSide BaseRground lhs) (convertBinding u a1) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a2)
+
+
+writeReturn :: IsKernel kernel => BaseVars env (Output t) -> GroundVars env t -> (UniformSchedule kernel env -> UniformSchedule kernel env)
+writeReturn TupRunit TupRunit = id
+writeReturn (TupRpair (TupRsingle (Var _ sig)) (TupRsingle v1)) (TupRsingle v2@(Var repr _)) | Refl <- outputSingle repr = Effect (RefWrite v1 (mapVar BaseRground v2)) . Effect (SignalResolve [sig])
+writeReturn (TupRpair a1 b1) (TupRpair a2 b2) = writeReturn a1 a2 . writeReturn b1 b2
+
+convertLHSInput :: GLeftHandSide a env env' -> BLeftHandSide (Input a) env env'
+convertLHSInput = undefined
+
+convertBinding :: Uniquenesses a -> C.PreOpenAcc (Cluster op) env t -> Binding env t
+convertBinding _ (C.Compute e) = Compute e
+convertBinding _ (C.Alloc sh e n) = Alloc sh e n
+convertBinding _ (C.Use e n b) = Use e n b
+convertBinding _ (C.Unit e) = Unit e
+convertBinding _ x = traceShow x undefined
+
+
+
+
 
 rnfSchedule' :: IsKernel kernel => UniformSchedule kernel env -> ()
 rnfSchedule' Return                        = ()
