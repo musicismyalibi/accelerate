@@ -83,13 +83,13 @@ instance IsSchedule UniformScheduleFun where
   type ScheduleInput  UniformScheduleFun a = Input a
   type ScheduleOutput UniformScheduleFun a = Output a
 
-  -- convertScheduleFun afun
-  --   | (partial, _) <- partialScheduleFun afun
-  --   = traceShow afun $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
-  --   $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv
-  --   $ fromPartialFun PEnd (ReusedVars IdxSet.empty) partial
+  convertScheduleFun afun
+    | (partial, _) <- partialScheduleFun afun
+    = traceShow afun $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
+    $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv
+    $ fromPartialFun PEnd (ReusedVars IdxSet.empty) partial
 
-  convertScheduleFun = convertScheduleFun'
+  --convertScheduleFun = convertScheduleFun'
 
 
   rnfSchedule (Slam lhs s) = rnfLeftHandSide rnfBaseR lhs `seq` rnfSchedule s
@@ -192,7 +192,10 @@ convertScheduleFun' = \case
     , Refl <- (reprIsBody @UniformScheduleFun grounds)
     , DeclareVars lhs sub value <- declareVars $ outputR grounds
     -> Slam lhs $ Sbody $ convertScheduleAcc (value weakenId) (weaken sub a)
-  C.Alam lhs f -> Slam (convertLHSInput lhs) (convertScheduleFun' f)
+  --C.Alam lhs f -> Slam (convertLHSInput lhs) (convertScheduleFun' f)
+  C.Alam lhs f 
+    | DeclareInput sub lhs' _ <- declareInput PEnd lhs
+    -> undefined --Slam lhs' (convertScheduleFun' f)
 
 convertScheduleAcc :: IsKernel kernel => BaseVars env (Output t) -> C.PreOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env
 convertScheduleAcc _ (C.Exec op args) = undefined
@@ -202,7 +205,7 @@ convertScheduleAcc value (C.Alet lhs u a1 a2) = convertLet value (C.Alet lhs u a
 convertScheduleAcc _ (C.Alloc sh e n) = undefined
 convertScheduleAcc _ (C.Use e n b) =  undefined
 convertScheduleAcc _ (C.Unit e) =  undefined
-convertScheduleAcc _ (C.Acond e a1 a2) = undefined
+convertScheduleAcc value (C.Acond e a1 a2) = Acond e (convertScheduleAcc value a1) (convertScheduleAcc value a2) Return
 convertScheduleAcc _ (C.Awhile u a1 a2 a3) = undefined
 
 
@@ -221,12 +224,42 @@ convertLet value (C.Alet lhs u (C.Exec op args) a) | Exists env <- convertEnvFro
                                                       | otherwise = var
                                                     combineMod' a _ = a -- Nothing has to be done when combining two scalars; they don't have access modifiers
 
--- convertLet value (C.Alet lhs u (C.Awhile u1 a1 a2 vs) a) = let (io, vs') = _
+-- convertLet value (C.Alet lhs u (C.Awhile u1 (C.Alam lhs1 (C.Abody a1)) (C.Alam lhs2 (C.Abody a2)) vs) a) = let (io, vs', creates) = getIO vs
+--                                                                --creates = getCreates vs vs'
 --                                                             in
---                                                             Alet (Awhile io _ vs' Return) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a)
+--                                                             creates $ Awhile io (f vs) vs' $ Alet (mapLeftHandSide BaseRground lhs) undefined (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a)
+--                                                           where
+--                                                             getIO :: GroundVars env a -> (InputOutputR (Input a) (Output a), BaseVars env (Input a), UniformSchedule kernel env -> UniformSchedule kernel env)
+--                                                             getIO TupRunit = (InputOutputRunit, TupRunit, id)
+--                                                             getIO (TupRsingle (Var v _)) | Refl <- inputSingle v
+--                                                                                          , io' <-  InputOutputRpair InputOutputRsignal InputOutputRref
+--                                                                                          , (sig, sigres) <- (BaseRsignal, BaseRsignalResolver)
+--                                                                                          , (ref, oRef) <- (BaseRref v, BaseRrefWrite v)
+--                                                                                          --, DeclareVars lhs sub vars <- declareVars (TupRpair (TupRsingle sig) (TupRsingle ref))
+--                                                                                          --, vars <- TupRsingle sig `TupRpair` TupRsingle ref
+--                                                                                          --, vars <- TupRsingle (Var sig $ SuccIdx $ SuccIdx ZeroIdx) `TupRpair` TupRsingle (Var ref ZeroIdx)
+--                                                                                          , binds <- Alet (LeftHandSideWildcard (TupRpair (TupRsingle ref) (TupRsingle oRef))) (NewRef v) . Alet (LeftHandSideWildcard (TupRpair (TupRsingle sig) (TupRsingle sigres))) NewSignal
+--                                                                                            = (io', undefined, binds)
+--                                                             getIO (TupRpair vs1 vs2) = let (io1, vs1', l1) = getIO vs1
+--                                                                                            (io2, vs2', l2) = getIO vs2
+--                                                                                        in
+--                                                                                          (InputOutputRpair io1 io2, TupRpair vs1' vs2', l1 . l2)
+
+--                                                             f :: GroundVars env a -> UniformScheduleFun kernel env (Input a -> Output PrimBool -> Output a -> ())
+--                                                             f _ = Slam _
+--                                                                 $ Slam (LeftHandSideSingle BaseRsignalResolver `LeftHandSidePair` LeftHandSideSingle (BaseRrefWrite $ GroundRscalar scalarType))
+--                                                                 $ Slam _
+--                                                                 $ Sbody
+--                                                                 $ serial [
+--                                                                   convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs1)) value) a1
+--                                                                 , Alet (LeftHandSideSingle $ BaseRground $ GroundRscalar scalarType) (RefRead $ Var (BaseRref $ GroundRscalar scalarType) $ SuccIdx ZeroIdx)
+--                                                                 $ Acond (Var scalarType ZeroIdx) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs2)) value) a2) Return Return
+--                                                                 ]
+                                                            
+                                                            --getCreates :: GroundVars env a -> BasesR (Input a) -> UniformSchedule kernel env -> UniformSchedule kernel env
+                                                            --getCreates _ TupRunit = _
 
 convertLet value (C.Alet lhs u a1 a2) = Alet (mapLeftHandSide BaseRground lhs) (convertBinding u a1) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a2)
-
 
 writeReturn :: IsKernel kernel => BaseVars env (Output t) -> GroundVars env t -> (UniformSchedule kernel env -> UniformSchedule kernel env)
 writeReturn TupRunit TupRunit = id
@@ -234,7 +267,14 @@ writeReturn (TupRpair (TupRsingle (Var _ sig)) (TupRsingle v1)) (TupRsingle v2@(
 writeReturn (TupRpair a1 b1) (TupRpair a2 b2) = writeReturn a1 a2 . writeReturn b1 b2
 
 convertLHSInput :: GLeftHandSide a env env' -> BLeftHandSide (Input a) env env'
-convertLHSInput = undefined
+convertLHSInput (LeftHandSideWildcard vs) = LeftHandSideWildcard $ inputR vs
+convertLHSInput (LeftHandSidePair lhs1 lhs2) = LeftHandSidePair (convertLHSInput lhs1) (convertLHSInput lhs2)
+--convertLHSInput (LeftHandSideSingle v) | Refl <- inputSingle v, Exists lhs' <- rebuildLHS $ LeftHandSidePair (LeftHandSideSingle BaseRsignal) (LeftHandSideSingle (BaseRref v)) = lhs'
+
+type family InputEnv env a where
+  InputEnv env () = env
+  InputEnv env (a, b) = ((env, Signal), Ref a)
+  InputEnv env a = ((env, Signal), Ref a)
 
 convertBinding :: Uniquenesses a -> C.PreOpenAcc (Cluster op) env t -> Binding env t
 convertBinding _ (C.Compute e) = Compute e
@@ -245,6 +285,208 @@ convertBinding _ x = traceShow x undefined
 
 
 
+data UsageOpenAcc (op :: Type -> Type) env a where
+  -- | Executes an executable operation. Such execution does not return a
+  -- value, the effects of the execution are only visible by the mutation of
+  -- buffers which were annotated with either 'Mut' or 'Out'.
+  -- Provides the operation arguments from the environment.
+  --
+  UsageExec    :: op args
+               -> Args env args
+               -> UsageOpenAcc op env ()
+
+  -- | Returns the values of the given variables.
+  --
+  UsageReturn  :: GroundVars env a
+               -> UsageOpenAcc op env a
+
+  -- | Evaluates the expression and returns its value.
+  --
+  UsageCompute :: Exp env t
+               -> UsageOpenAcc op env t
+
+  -- | Local binding of ground values.
+  -- As it is common in this intermediate representation to evaluate some program
+  -- resulting in unit, for instance when execution some operation, and then
+  -- and then do some other code, we write 'a; b' to denote 'let () = a in b'.
+  UsageAlet    :: SyncEnv env
+               -> GLeftHandSide bnd env env'
+               -> Uniquenesses bnd
+               -> UsageOpenAcc op env  bnd
+               -> UsageOpenAcc op env' t
+               -> UsageOpenAcc op env  t
+
+  -- | Allocates a new buffer of the given size.
+  --
+  UsageAlloc   :: ShapeR sh
+               -> ScalarType e
+               -> ExpVars env sh
+               -> UsageOpenAcc op env (Buffer e)
+
+  -- | Buffer inlet. To pass an array constant in this data type, one may need
+  -- multiple 'Use' constructs because of the explicit Structure-of-Arrays.
+  -- Triggers (possibly) asynchronous host->device transfer if necessary.
+  --
+  UsageUse     :: ScalarType e
+               -> Int -- Number of elements
+               -> Buffer e
+               -> UsageOpenAcc op env (Buffer e)
+
+  -- | Capture a scalar in a singleton buffer
+  --
+  UsageUnit    :: ExpVar env e
+               -> UsageOpenAcc op env (Buffer e)
+
+  -- | If-then-else for array-level computations
+  --
+  UsageAcond   :: SyncEnv env
+               -> ExpVar env PrimBool
+               -> UsageOpenAcc op env a
+               -> UsageOpenAcc op env a
+               -> UsageOpenAcc op env a
+
+  -- Value-recursion for array-level computations
+  -- The uniqueness guarantees are an invariant of the loop
+  -- and should hold before and after each iteration.
+  --
+  UsageAwhile  :: SyncEnv env
+               -> Uniquenesses a
+               -> UsageOpenAfun op env (a -> PrimBool)
+               -> UsageOpenAfun op env (a -> a)
+               -> GroundVars     env a
+               -> UsageOpenAcc  op env a
+
+-- | Function abstraction over parametrised array computations
+--
+data UsageOpenAfun op env t where
+  UsageAbody ::                             UsageOpenAcc  op env  t -> UsageOpenAfun op env t
+  UsageAlam  :: GLeftHandSide a env env' -> UsageOpenAfun op env' t -> UsageOpenAfun op env (a -> t)
+
+usageAnalysisOpenAcc ::C.PreOpenAcc op env t -> UsageOpenAcc op env t
+usageAnalysisOpenAcc (C.Exec op args) = UsageExec op args
+usageAnalysisOpenAcc (C.Return vs) = UsageReturn vs
+usageAnalysisOpenAcc (C.Compute e) = UsageCompute e
+usageAnalysisOpenAcc (C.Alet lhs u a1 a2) = let a1' = usageAnalysisOpenAcc a1
+                                                a2' = usageAnalysisOpenAcc a2
+                                                used = unionPartialEnv max (syncEnvUsage a1') (weakenSyncEnv lhs (syncEnvUsage a2'))
+                                            in UsageAlet used lhs u a1' a2'
+usageAnalysisOpenAcc (C.Alloc sh e n) = UsageAlloc sh e n
+usageAnalysisOpenAcc (C.Use e n b) =  UsageUse e n b
+usageAnalysisOpenAcc (C.Unit e) =  UsageUnit e
+usageAnalysisOpenAcc (C.Acond e a1 a2) = let a1' = usageAnalysisOpenAcc a1
+                                             a2' = usageAnalysisOpenAcc a2
+                                             used = unionPartialEnv max (syncEnvUsage a1') (syncEnvUsage a2')
+                                         in UsageAcond used e a1' a2'
+usageAnalysisOpenAcc (C.Awhile u a1 a2 vs) = let a1' = usageAnalysisOpenAFun a1
+                                                 a2' = usageAnalysisOpenAFun a2
+                                                 used = unionPartialEnv max (syncEnvFunUsage a1') $ unionPartialEnv max (syncEnvFunUsage a2') $ variablesToSyncEnv u vs
+                                             in UsageAwhile used u a1' a2' vs
+
+
+usageAnalysisOpenAFun :: C.PreOpenAfun op env t -> UsageOpenAfun op env t
+usageAnalysisOpenAFun (C.Abody a) = UsageAbody (usageAnalysisOpenAcc a)
+usageAnalysisOpenAFun (C.Alam lhs f) = UsageAlam lhs (usageAnalysisOpenAFun f)
+
+
+syncEnvUsage :: UsageOpenAcc op env t -> SyncEnv env
+syncEnvUsage (UsageExec op args) = syncEnvFromList (argsVars args)
+syncEnvUsage (UsageReturn vs) = variablesToReadSyncEnv vs
+syncEnvUsage (UsageCompute e) = syncEnvReadFromList (expGroundVars e)
+syncEnvUsage (UsageAlet s _ _ _ _) = s
+syncEnvUsage (UsageAlloc sh e n) = PEnd
+syncEnvUsage (UsageUse e n b) = PEnd
+syncEnvUsage (UsageUnit e) = PEnd
+syncEnvUsage (UsageAcond s _ _ _) = s
+syncEnvUsage (UsageAwhile s _ _ _ _) = s
+
+syncEnvFunUsage :: UsageOpenAfun op env t -> SyncEnv env
+syncEnvFunUsage (UsageAlam lhs f) = weakenSyncEnv lhs $ syncEnvFunUsage f
+syncEnvFunUsage (UsageAbody s)    = syncEnvUsage s
+
+variablesToReadSyncEnv :: GroundVars genv t -> SyncEnv genv
+variablesToReadSyncEnv vars = partialEnvFromList combine $ go vars []
+  where
+    go :: GroundVars genv t -> [EnvBinding Sync genv] -> [EnvBinding Sync genv]
+    go (TupRsingle (Var (GroundRbuffer _) ix))
+                          accum = EnvBinding ix SyncRead : accum
+    go (TupRpair v1 v2) accum = go v1 $ go v2 accum
+    go _                accum = accum
+
+    combine :: Sync s -> Sync s -> Sync s
+    combine SyncRead SyncRead = SyncRead
+    combine _        _        = internalError "A writable buffer cannot be aliassed"
+
+syncEnvReadFromList :: [Exists (GroundVar env)] -> SyncEnv env
+syncEnvReadFromList vs = partialEnvFromList combine $ mapMaybe syncReadEnvVar vs
+  where
+    syncReadEnvVar :: Exists (GroundVar env) -> Maybe (EnvBinding Sync env)
+    syncReadEnvVar (Exists (Var (GroundRscalar tp) ix)) = Nothing
+    syncReadEnvVar (Exists (Var (GroundRbuffer tp) ix)) = Just $ EnvBinding ix SyncRead
+
+    combine :: Sync s -> Sync s -> Sync s
+    combine SyncRead SyncRead = SyncRead
+    combine _        _        = internalError "A writable buffer cannot be aliassed"
+
+syncEnvFromList :: [Exists (Var AccessGroundR env)] -> SyncEnv env
+syncEnvFromList vs = partialEnvFromList combine $ mapMaybe syncEnvVar vs
+  where
+    combine :: Sync s -> Sync s -> Sync s
+    combine SyncRead SyncRead = SyncRead
+    combine _        _        = internalError "A writable buffer cannot be aliassed"
+
+syncEnvVar :: Exists (Var AccessGroundR genv) -> Maybe (EnvBinding Sync genv)
+syncEnvVar (Exists (Var (AccessGroundRscalar    tp) ix)) = Nothing
+syncEnvVar (Exists (Var (AccessGroundRbuffer In tp) ix)) = Just $ EnvBinding ix SyncRead
+syncEnvVar (Exists (Var (AccessGroundRbuffer m  tp) ix)) = Just $ EnvBinding ix SyncWrite
+
+
+fromUsage :: IsKernel kernel => BaseVars env' (Output t) -> FutureEnv env' env -> UsageOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env'
+fromUsage outputVars env (UsageExec op args) = undefined
+fromUsage outputVars env (UsageReturn vs) = let (signals, write) = getOutput outputVars vs env
+                                            in Effect (SignalAwait signals) write
+fromUsage outputVars env (UsageCompute e) = fromUsageBinding outputVars (expGroundVars e) undefined (Compute e) env
+fromUsage outputVars env (UsageAlet s lhs u a1 a2) = undefined
+fromUsage outputVars env (UsageAlloc sh e n) = undefined
+fromUsage outputVars env (UsageUse e n b) = undefined
+fromUsage outputVars env (UsageUnit e) = undefined
+fromUsage outputVars env (UsageAcond s e a1 a2) = undefined
+fromUsage outputVars env (UsageAwhile s u f1 f2 vs) = undefined
+
+fromUsageFun :: IsKernel kernel => UsageOpenAfun (Cluster (KernelOperation kernel)) env t -> UniformScheduleFun kernel env (Scheduled UniformScheduleFun t)
+fromUsageFun = undefined
+
+getOutput :: BaseVars env' (Output t) -> GroundVars env t -> FutureEnv env' env -> ([Idx env' Signal], UniformSchedule kernel env')
+getOutput TupRunit TupRunit _ = ([], Return)
+getOutput (TupRpair (TupRsingle (Var BaseRsignalResolver s1)) (TupRsingle dest)) (TupRsingle (Var tp ix)) env | Refl <- inputSingle tp =
+  case prjPartial ix env of
+    Nothing -> ([], Return)
+    Just (FutureScalar _ signal ref) -> ([signal], 
+                                         Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
+                                         $ Effect (RefWrite (weaken (weakenSucc weakenId) dest) (Var (BaseRground tp) ZeroIdx))
+                                         $ Effect (SignalResolve [weakenSucc weakenId >:> s1])
+                                         Return
+                                        )
+    Just (FutureBuffer _ signal ref read (Just write)) -> ([signal], 
+                                         Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
+                                         $ Effect (RefWrite (weaken (weakenSucc weakenId) dest) (Var (BaseRground tp) ZeroIdx))
+                                         $ Effect (SignalResolve [weakenSucc weakenId >:> s1])
+                                         Return
+                                        )
+getOutput (TupRpair t1 t2) (TupRpair v1 v2) env = let 
+                               (s1, w1) = getOutput t1 v1 env
+                               (s2, w2) = getOutput t2 v2 env
+                             in (s1 ++ s2, serial [w1, w2])
+
+fromUsageBinding :: IsKernel kernel => BaseVars env' (Output t) -> [Exists (GroundVar env)] -> GroundsR t -> Binding env t -> FutureEnv env' env -> UniformSchedule kernel env'
+fromUsageBinding outputVars used grnds bnd env | DeclareVars lhs k' value <- declareVars $ mapTupR BaseRground grnds,
+                                           write <- bindOutput (mapTupR (weaken k') outputVars) grnds
+                                          = Effect (SignalAwait [])
+                                            $ Alet lhs undefined
+                                            $ Effect (SignalResolve [])
+                                            write
+
+bindOutput :: BaseVars env' (Output t) -> GroundsR t -> UniformSchedule kernel env'
+bindOutput = undefined
 
 
 rnfSchedule' :: IsKernel kernel => UniformSchedule kernel env -> ()
