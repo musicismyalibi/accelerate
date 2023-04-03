@@ -543,7 +543,25 @@ fromUsageFun env (UsageAbody body) | grounds <- groundsR body
                                     go (TupRsingle tp@(GroundRscalar t)) (TupRpair (TupRsingle (Var BaseRsignalResolver ix1)) (TupRsingle (Var (BaseRrefWrite _) ix2))) | Refl <- outputSingle tp = TupRsingle $ OutputScalar t ix2 ix1
                                     go (TupRsingle (GroundRbuffer t)) (TupRpair (TupRsingle (Var BaseRsignalResolver ix1)) (TupRsingle (Var (BaseRrefWrite _) ix2))) = TupRsingle $ OutputSingleBuffer t ix2 ix1
                                     go (TupRpair g1 g2) (TupRpair v1 v2) = TupRpair (go g1 v1) (go g2 v2)
-fromUsageFun env (UsageAlam lhs f) = undefined
+fromUsageFun env (UsageAlam lhs f) | DeclareLam lhs' env' <- declareLam env lhs 
+                                   = Slam lhs' (fromUsageFun env' f)
+
+data DeclareLam fenv env' t where
+  DeclareLam :: BLeftHandSide (Input t) fenv fenv'
+               -> FutureEnv fenv' env'
+               -> DeclareLam fenv env' t
+
+declareLam :: FutureEnv fenv env -> GLeftHandSide t env env' -> DeclareLam fenv env' t
+declareLam env (LeftHandSidePair lhs1 lhs2) | DeclareLam lhs1' env1 <- declareLam env lhs1
+                                            , DeclareLam lhs2' env2 <- declareLam env1 lhs2
+                                            = DeclareLam (LeftHandSidePair lhs1'  lhs2') env2
+declareLam env (LeftHandSideWildcard w) = DeclareLam (LeftHandSideWildcard (inputR w)) env
+declareLam env (LeftHandSideSingle (GroundRscalar tp)) | Refl <- inputSingle $ GroundRscalar tp = DeclareLam 
+                                                         (LeftHandSideSingle BaseRsignal `LeftHandSidePair` LeftHandSideSingle (BaseRref $ GroundRscalar tp))
+                                                         (PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc weakenId)) env) (FutureScalar tp (SuccIdx ZeroIdx) ZeroIdx))
+declareLam env (LeftHandSideSingle (GroundRbuffer tp)) = DeclareLam 
+                                                         (LeftHandSideSingle BaseRsignal `LeftHandSidePair` LeftHandSideSingle (BaseRref $ GroundRbuffer tp))
+                                                         (PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc weakenId)) env) (FutureBuffer tp undefined ZeroIdx (Move (SuccIdx ZeroIdx)) Nothing))
 
 getOutput :: OutputVars env' t -> GroundVars env t -> FutureEnv env' env -> ([Idx env' Signal], UniformSchedule kernel env')
 getOutput TupRunit TupRunit _ = ([], Return)
@@ -602,7 +620,7 @@ declareLet env (LeftHandSidePair lhs1 lhs2) (TupRpair u1 u2) | DeclareLet k1 ins
                                                              , DeclareLet k2 instr2 output2 env2 <- declareLet env1 lhs2 u2
                                                              = DeclareLet (k2 .> k1) (instr1 . instr2) (TupRpair (mapTupR (weaken k2) output1) output2) env2
 declareLet env (LeftHandSideWildcard TupRunit) TupRunit = DeclareLet weakenId id TupRunit env
-declareLet env (LeftHandSideWildcard _) TupRunit = DeclareLet weakenId id (TupRsingle OutputEmpty) env
+declareLet env (LeftHandSideWildcard _) _ = DeclareLet weakenId id (TupRsingle OutputEmpty) env
 declareLet env (LeftHandSideSingle t@(GroundRscalar tp)) _ = DeclareLet
                                                             (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
                                                             (Alet lhsSignal NewSignal
