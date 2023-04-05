@@ -60,8 +60,15 @@ LabelArgs is the same as LabelEnv, except it is bound to Args. The ELabels in he
 data Label = Label
   { _labelId :: Int
   , _parent :: Maybe Label
-  } deriving (Eq, Ord, Show, Read)
+  } -- deriving Show
 makeLenses ''Label
+instance Show Label where
+  show = ("Label"<>) . show . _labelId
+instance Eq Label where
+  (Label x a) == (Label y b)
+    | x == y = if a == b then True else error $ "same labelId but different parents: " <> show a <> " - " <> show b
+    | otherwise = False
+deriving instance Ord Label
 
 level :: Label -> Int
 level (Label _ Nothing)  = 0

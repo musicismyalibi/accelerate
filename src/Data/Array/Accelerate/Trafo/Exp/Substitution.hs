@@ -321,6 +321,7 @@ instance SinkExp (PreOpenFun arr) where
   {-# INLINEABLE weakenE #-}
   weakenE v = Stats.substitution "weakenE" . rebuildE (rebuildWeakenEvar v)
 
+
 -- This rewrite rule is disabled because 'weaken' is now part of a type class.
 -- As such, we cannot attach a NOINLINE pragma because it has many definitions.
 -- {-# RULES

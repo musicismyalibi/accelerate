@@ -21,6 +21,15 @@ import qualified Data.Map as M
 import {-# SOURCE #-} Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph ( Var, MakesILP )
 
 
+-- Currently the only instance is for MIP, which gives bindings to a couple of solvers.
+-- Still, this way we minimise the surface that has to interact with MIP, can more easily
+-- adapt if it changes, and we could easily add more bindings.
+class (MakesILP op) => ILPSolver ilp op where
+  solve :: ilp -> ILP op -> IO (Maybe (Solution op))
+
+
+
+
 data OptDir = Maximise | Minimise
   deriving Show
 
@@ -37,7 +46,7 @@ instance Show Number where
 data Expression op where
   Constant :: Number -> Expression op
   (:+)  :: Expression op -> Expression op -> Expression op
-  (:*)  :: Number -> Var op -> Expression op 
+  (:*)  :: Number -> Var op -> Expression op
 deriving instance Show (Var op) => Show (Expression op)
 
 data Constraint op where
@@ -74,7 +83,7 @@ infixl 8 .*.
 (.+.) = (:+)
 (.-.)  :: Expression op -> Expression op -> Expression op
 e1 .-. e2 = e1 .+. ((-1) .*. e2)
-(.*.)  :: Int           -> Expression op -> Expression op 
+(.*.)  :: Int           -> Expression op -> Expression op
 i .*. (Constant (Number f)) = Constant $ Number $ (*i) . f
 i .*. (e1 :+ e2) = (:+) (i .*. e1) (i .*. e2)
 i .*. (Number f :* v) = (:*) (Number ((*i) . f)) v
@@ -116,10 +125,30 @@ between :: Expression op -> Expression op -> Expression op -> Constraint op
 between x y z = x .<=. y <> y .<=. z
 
 
+notB :: Expression op -> Expression op
+notB e = int 1 .-. e
 
--- Currently the only instance is for MIP, which gives bindings to a couple of solvers.
--- Still, this way we minimise the surface that has to interact with MIP, can more easily
--- adapt if it changes, and we could easily add more bindings.
-class (MakesILP op) => ILPSolver ilp op where
-  solve :: ilp -> ILP op -> IO (Maybe (Solution op))
+-- | If a is 0, then b must be 0
+impliesB :: Expression op -> Expression op -> Constraint op
+impliesB a b = a .>=. b
 
+-- | Iff a and b are 0, the result is 0
+andB  :: Expression op -> Expression op -> Expression op -> Constraint op
+andB a b r = orB (notB a) (notB b) (notB r)
+
+-- | Iff a and b are 1, r is 1
+-- not sure if this encoding is new, nor whether it is the simplest, but I think it works.
+-- perhaps defining andB is easier than defining orB?
+orB :: Expression op -> Expression op -> Expression op -> Constraint op
+orB a b r =
+  (2 .*. r .<=. a .+. b) -- r can only be 1 if both a and b are 1, so this line fixes 3/4 cases
+  <>
+  (r .+. int 1 .>=. a .+. b) -- and this line forces r to be 1 if a and b are both 1, while not restricting the other cases
+
+isEqualRangeN :: Expression op -> Expression op -> Expression op -> Constraint op
+isEqualRangeN = isEqualRange timesN
+
+-- given a function f that multiplies by the size of the domain of a and b, r can only be 0(true) when a and b are equal
+-- note that r can always be 1
+isEqualRange :: (Expression op -> Expression op) -> Expression op -> Expression op -> Expression op -> Constraint op
+isEqualRange f a b r = a .-. f r .<=. b <> b .<=. a .+. f r

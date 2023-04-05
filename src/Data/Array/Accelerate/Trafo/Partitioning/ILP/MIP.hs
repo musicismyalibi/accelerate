@@ -10,6 +10,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-} -- Shame on me!
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Data.Array.Accelerate.Trafo.Partitioning.ILP.MIP (
   -- Exports default paths to 6 solvers, as well as an instance to ILPSolver for all of them
@@ -18,6 +19,7 @@ module Data.Array.Accelerate.Trafo.Partitioning.ILP.MIP (
 
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph (MakesILP)
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph (Var)
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.NameGeneration ( freshName )
 
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import qualified Data.Map as M
@@ -26,25 +28,27 @@ import Numeric.Optimization.MIP hiding (Bounds, Constraint, Var, Solution, name)
 import qualified Numeric.Optimization.MIP as MIP
 import qualified Numeric.Optimization.MIP.Solver.Base as MIP
 import Data.Scientific ( Scientific )
-import Data.Bifunctor (bimap, first, second)
+import Data.Bifunctor (bimap, first)
 
 import Numeric.Optimization.MIP.Solver
     ( cbc, cplex, glpsol, gurobiCl, lpSolve, scip )
-import Data.Char (ord)
 import Data.Maybe (mapMaybe)
-import Control.Monad.State
-import Control.Monad.Reader
--- import qualified Debug.Trace
+import Control.Monad.State ( State, gets, modify, runState )
+import Control.Monad.Reader ( Reader, asks, runReader )
+import Lens.Micro.Mtl ( zoom )
+import Lens.Micro ( _2 )
+import qualified Debug.Trace
 
 instance (MakesILP op, MIP.IsSolver s IO) => ILPSolver s op where
-  solve s (ILP dir obj constr bnds n) = makeSolution names <$> MIP.solve s options problem
+  solve :: s -> ILP op -> IO (Maybe (Solution op))
+  solve s (ILP dir obj constr bnds n) = Debug.Trace.traceShowId . makeSolution names <$> MIP.solve s options problem
     where
       options = MIP.SolveOptions{ MIP.solveTimeLimit   = Nothing
                                 , MIP.solveLogger      = putStrLn . ("AccILPSolver: "      ++)
                                 , MIP.solveErrorLogger = putStrLn . ("AccILPSolverError: " ++) }
 
       stateProblem = Problem (Just "AccelerateILP") <$> (mkFun dir <$> expr n obj) <*> cons n constr <*> pure [] <*> pure [] <*> vartypes <*> (bounds bnds >>= finishBounds)
-      (problem, (names,_)) = runState stateProblem ((mempty, mempty),"")
+      (problem, (names,_)) = Debug.Trace.traceShowId $ runState stateProblem ((mempty, mempty),"")
 
       mkFun Maximise = ObjectiveFunction (Just "AccelerateObjective") OptMax
       mkFun Minimise = ObjectiveFunction (Just "AccelerateObjective") OptMin
@@ -90,15 +94,10 @@ allIntegers = gets $ M.fromList . map ((,IntegerVariable) . toVar) . M.keys . fs
 -- Instead, we generate small placeholders here and store their meaning
 type Names op = (M.Map String (Graph.Var op), M.Map (Graph.Var op) String)
 type STN op = State (Names op, String)
-freshName :: STN op String
-freshName = do
-  modify $ second increment
-  gets $ ('x':) . snd -- to avoid generating keywords, we simply prepend every name with an 'x'. This still leaves 26^254 options, more than enough!
-  where
-    increment (char:cs)
-      | ord char < ord 'z' = toEnum (ord char + 1) : cs
-      | otherwise = 'a' : increment cs
-    increment "" = "a"
+-- to avoid generating keywords, we simply prepend every name with an 'x'. This still leaves 26^254 options, more than enough!
+freshName' :: STN op String
+freshName' = zoom _2 $ freshName "x" 
+
 
 var :: MakesILP op => Graph.Var op -> STN op MIP.Var
 var v = do
@@ -106,7 +105,7 @@ var v = do
   case maybeName of
     Just name -> return $ toVar name
     Nothing -> do
-      name <- freshName
+      name <- freshName'
       modify $ first $ bimap (M.insert name v) (M.insert v name)
       return $ toVar name
 

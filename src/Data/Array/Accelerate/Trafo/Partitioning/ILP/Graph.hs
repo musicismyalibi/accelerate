@@ -55,7 +55,8 @@ import Data.Array.Accelerate.Representation.Type (TupR)
 import Data.Array.Accelerate.AST.LeftHandSide (LeftHandSide (LeftHandSideSingle, LeftHandSideWildcard, LeftHandSidePair, LeftHandSideUnit))
 import Data.Array.Accelerate.Representation.Shape (ShapeR)
 import Data.Bifunctor (first)
-
+import GHC.Stack
+import qualified Debug.Trace
 
 -- | Directed edge (a :-> b): `b` depends on `a`.
 -- We only ever want to have these edges if a and b have the same parent, see `-?>` for a safe constructor.
@@ -64,7 +65,7 @@ data Edge = Label :-> Label
 
 -- | Safe constructor for edges: finds the lowest pairs of ancestors that are in the same subcomputation, and adds the constraint there.
 -- Useful if `y` uses some result of `x`, and there is no clear guarantee that they have the same origin. Always gives a legal edge,
--- and if `x != y` then it will never return an 'identity edge'.
+-- and if x and y are not equal nor ancestors of each other then it will never return an 'identity edge'.
 (-?>) :: Label -> Label -> Edge
 x@(Label _ a) -?> y@(Label _ b)
   -- all fromJusts are safe, because @level x > 0 => parent x ~ Just _@
@@ -108,24 +109,33 @@ data Var (op :: Type -> Type)
   | ManifestOutput Label
     -- ^ 0 means manifest, 1 is like a `delayed array`.
     -- Binary variable; will we write the output to a manifest array, or is it fused away (i.e. all uses are in its cluster)?
+  | InDir Label
+  -- ^ -3 can't fuse with anything, -2 for 'left to right', -1 for 'right to left', n for 'unpredictable, see computation n' (currently only backpermute)
+  | OutDir Label -- as InDir, but for the output of this label
+  | Other String
+    -- ^ For one-shot variables that don't deserve a constructor. These are also integer variables, and the responsibility is on the user to pick a unique name!
+    -- It is possible to add a variation for continuous variables too, see `allIntegers` in MIP.hs.
   | BackendSpecific (BackendVar op)
     -- ^ Vars needed to express backend-specific fusion rules.
     -- This is what allows backends to specify how each of the operations can fuse.
 
 deriving instance Eq   (BackendVar op) => Eq   (Var op)
-deriving instance Ord  (BackendVar op) => Ord  (Var op)
+deriving instance Ord  (BackendVar op) => Ord  (Var op) -- for translating to ILP format, see MIP.hs
 deriving instance Show (BackendVar op) => Show (Var op)
-deriving instance Read (BackendVar op) => Read (Var op)
+
 
 -- convenience synonyms
 pi :: Label -> Expression op
 pi l      = c $ Pi l
+
+delayed :: Label -> Expression op
+delayed = notB . manifest
 manifest :: Label -> Expression op
 manifest l = c $ ManifestOutput l
 -- | Safe constructor for Fused variables
-fused :: Label -> Label -> Expression op
+fused :: HasCallStack => Label -> Label -> Expression op
 fused x y = let x' :-> y' = x -?> y
-            in c $ Fused x' y'
+            in if x' /= y' then c $ Fused x' y' else error $ "reflexive fused variable " <> show x'
 
 data LabelledArgOp op env a = LOp (Arg env a) (ALabels a) (BackendArg op)
 type LabelledArgsOp op env = PreArgs (LabelledArgOp op env)
@@ -145,7 +155,7 @@ unLabelOp (LOp arg _ _ :>: args) = arg :>: unLabelOp args
 
 type BackendCluster op = PreArgs (BackendClusterArg op)
 
-class (Eq (BackendVar op), Ord (BackendVar op), Eq (BackendArg op)) => MakesILP op where
+class (Eq (BackendVar op), Ord (BackendVar op), Eq (BackendArg op), Show (BackendVar op)) => MakesILP op where
   -- Vars needed to express backend-specific fusion rules.
   type BackendVar op
   -- Information that the backend attaches to the argument for reconstruction,
@@ -160,7 +170,7 @@ class (Eq (BackendVar op), Ord (BackendVar op), Eq (BackendArg op)) => MakesILP 
   mkGraph :: op args -> LabelledArgs env args -> Label -> Information op
 
   -- using the ILP solution, attach the required information to each argument
-  labelLabelledArg :: M.Map (BackendVar op) Int -> Label -> LabelledArg env a -> LabelledArgOp op env a
+  labelLabelledArg :: M.Map (Var op) Int -> Label -> LabelledArg env a -> LabelledArgOp op env a
   getClusterArg :: LabelledArgOp op env a -> BackendClusterArg op a
 
   -- allow the backend to add constraints/bounds for every node
@@ -288,12 +298,12 @@ backendConstruc sol = M.mapWithKey f
       _ -> con
     g :: Label -> LabelledArgs env args -> LabelledArgsOp op env args
     g _ ArgsNil = ArgsNil
-    g l (arg :>: args) = labelLabelledArg smallermap l arg :>: g l args
-    -- using toAscList and fromAscList is probably slightly faster
-    smallermap :: Map (BackendVar op) Int
-    smallermap = M.fromList . map (first (\(BackendSpecific x) -> x)) . filter ((\case
-                                                        BackendSpecific{} -> True
-                                                        _ -> False) . fst) $ M.toList sol
+    g l (arg :>: args) = labelLabelledArg sol l arg :>: g l args
+    -- -- using toAscList and fromAscList is probably slightly faster
+    -- smallermap :: Map (BackendVar op) Int
+    -- smallermap = M.fromList . map (first (\(BackendSpecific x) -> x)) . filter ((\case
+    --                                                     BackendSpecific{} -> True
+    --                                                     _ -> False) . fst) $ M.toList sol
 
 
 -- strips underscores from constructor names
@@ -308,9 +318,9 @@ makeLenses ''Information
 makeFullGraph :: (MakesILP op)
               => PreOpenAcc op () a
               -> (Information op, Map Label (Construction op))
-makeFullGraph acc = (i, constrM)
+makeFullGraph acc = (i & constr <>~ maybe mempty (\l -> manifest l .==. int 0) output, constrM)
   where
-    (FGRes i _ constrM, _) = runState (mkFullGraph acc) (FGState LabelEnvNil (Label 0 Nothing) 0)
+    (FGRes i output constrM, _) = runState (mkFullGraph acc) (FGState LabelEnvNil (Label 0 Nothing) 0)
 
 makeFullGraphF :: (MakesILP op)
                => PreOpenAfun op () a
@@ -345,6 +355,10 @@ mkFullGraph (Alet LeftHandSideUnit _ bnd scp) = do
   return $ (res1 <> res2)
          & l_res .~ (res2 ^. l_res)
 
+-- In contrast to the case above, this case does enforce a strict ordering. Yes, this could prevent fusion that should be legal,
+-- but (I think) not in the shapes that we actually get.
+-- TODO: check: I think we only ever really generate these non-unit letbindings for binding 1 infusible node (conditional, alloc) at a time?
+-- Could enforce this in the types
 mkFullGraph (Alet (lhs :: GLeftHandSide bnd env env') u bnd scp) = do
   l <- freshL
   bndRes <- mkFullGraph bnd
@@ -449,17 +463,17 @@ mkFullGraphF (Abody acc) = do
   l <- freshL
   currL.parent .= Just l
   res <- mkFullGraph acc
+  let output = snd $ Debug.Trace.traceShowId . ("bodyresult",) $ res ^. l_res
   currL.parent .= l ^. parent
-  return $ res
+  return $ res 
+         & info . constr <>~ maybe mempty (\l' -> manifest l' .==. int 0) output
          & l_res    ?~ l
          & info.graphI.graphNodes %~ S.insert l
          & construc %~ M.insert l CBod
 
 mkFullGraphF (Alam lhs f) = do
   l <- freshL
-  currL.parent .= Just l
   (res, mylhs) <- zoomState lhs l (mkFullGraphF f)
-  currL.parent .= l ^. parent
   return $ res
          & l_res    ?~ l
          & info.graphI.graphNodes %~ S.insert l

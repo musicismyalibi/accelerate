@@ -71,11 +71,11 @@ convertAfunWith _ = withSimplStats gurobiFusionF
 
 
 withSimplStats :: a -> a
-#ifdef ACCELERATE_DEBUG
-withSimplStats x = unsafePerformIO Stats.resetSimplCount `seq` x
-#else
+-- #ifdef ACCELERATE_DEBUG
+-- withSimplStats x = unsafePerformIO Stats.resetSimplCount `seq` x
+-- #else
 withSimplStats x = x
-#endif
+-- #endif
 
 -- dontFuse :: op args -> Args env args -> Cluster' op args
 -- dontFuse = unfused

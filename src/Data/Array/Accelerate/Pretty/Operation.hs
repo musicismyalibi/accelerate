@@ -23,9 +23,12 @@ module Data.Array.Accelerate.Pretty.Operation (
   PrettyOp(..),
   prettyAcc, prettyOpenAcc,
   prettyAfun, prettyOpenAfun,
-  prettyGroundR, Val'(..),
+  prettyGroundR, prettyGroundRWithUniqueness,
+  Val'(..), val, empty',
+  prettyVar, prettyVars,
   prettyArg, prettyShapeVars, prettyModifier, prettyBuffer,
-  prettyFun, prettyExp, prettyExp', prettyArrayInstr
+  prettyFun, prettyExp, prettyExp', prettyArrayInstr,
+  prettyGLhsWithTypes, prettyGLhsWithUniquenessTypes,
 ) where
 
 import Data.Array.Accelerate.Pretty.Exp

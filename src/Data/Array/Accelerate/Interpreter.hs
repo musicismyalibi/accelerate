@@ -75,7 +75,7 @@ import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad.ST
 import Data.Bits
 import Data.Array.Accelerate.Backend
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph (Var (BackendSpecific), (-?>), fused, infusibleEdges, manifest, LabelledArgOp (LOp))
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph (Var (..), (-?>), fused, infusibleEdges, manifest, LabelledArgOp (LOp))
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 import qualified Data.Set as Set
@@ -129,7 +129,7 @@ instance Eq (BackendClusterArg2 InterpretOp env arg) where
 instance StaticClusterAnalysis InterpretOp where
   data BackendClusterArg2 InterpretOp env arg = BCA (Int -> Int)
 
-  onOp IBackpermute (BCA outF :>: ArgsNil) (ArgFun f :>: i :>: o :>: ArgsNil) env = 
+  onOp IBackpermute (BCA outF :>: ArgsNil) (ArgFun f :>: i :>: o :>: ArgsNil) env =
     let ArgArray In  (ArrayR shr  _) (flip varsGetVal env -> sh ) _ = i
         ArgArray Out (ArrayR shr' _) (flip varsGetVal env -> sh') _ = o in
                       BCA id :>: BCA (toIndex shr sh . evalFun f (evalArrayInstrDefault env) . fromIndex shr' sh' . outF) :>: BCA outF :>: ArgsNil
@@ -139,7 +139,7 @@ instance StaticClusterAnalysis InterpretOp where
                       BCA id :>: BCA outF :>: BCA outF :>: ArgsNil
   onOp IPermute _ _ _ = BCA id :>: BCA id :>: BCA id :>: BCA id :>: ArgsNil
   onOp (IFold1 _) (BCA outF :>: ArgsNil) (_ :>: i :>: _ :>: ArgsNil) env =
-    let ArgArray In _ (flip varsGetVal env -> (_, sz)) _ = i 
+    let ArgArray In _ (flip varsGetVal env -> (_, sz)) _ = i
         inF x = (+ x `mod` sz) $ outF (x `div` sz) -- this is where the magic happens to fuse backpermute . fold. Would be cleaner on shapes instead of Ints
     in BCA id :>: BCA inF :>: BCA outF :>: ArgsNil
   onOp (IScan1 _ _) _ _ _ = BCA id :>: BCA id :>: BCA id :>: ArgsNil -- here we trust that our ILP prevented any backpermutes after the scan
@@ -200,27 +200,27 @@ instance DesugarAcc InterpretOp where
           case mkLHS tp of
             LHS lhs vars ->
               mkMap
-                (ArgFun $ 
-                  Lam lhs $ Body $ (\f -> apply2 tp f (weakenThroughReindex wTemp reindexExp $ 
+                (ArgFun $
+                  Lam lhs $ Body $ (\f -> apply2 tp f (weakenThroughReindex wTemp reindexExp $
                     weakenE weakenEmpty seed) (expVars vars)) $ weakenThroughReindex wTemp reindexExp f)
                 (ArgArray In arr' (weakenVars wTemp sh') (kTemp weakenId))
                 (weaken wTemp c)
   mkScan dir a Nothing b c = Exec (IScan1 dir $ unsafePerformIO $ newIORef mempty) (a :>: b :>: c :>: ArgsNil)
   -- we desugar a Scan with seed into a scan1 followed by a map followed by an append
-  mkScan dir comb (Just (ArgExp seed)) i@(ArgArray In arr@(ArrayR shr tp) sh _) o 
-    | DeclareVars lhsTemp1 wTemp  kTemp1 <- declareVars $ buffersR tp 
+  mkScan dir comb (Just (ArgExp seed)) i@(ArgArray In arr@(ArrayR shr tp) sh _) o
+    | DeclareVars lhsTemp1 wTemp  kTemp1 <- declareVars $ buffersR tp
     , DeclareVars lhsTemp2 wTemp2 kTemp2 <- declareVars $ buffersR tp
-    , wTemp1 <- wTemp2 .> wTemp = 
-      aletUnique lhsTemp1 (desugarAlloc arr $ fromGrounds sh) $ 
-        aletUnique lhsTemp2 (desugarAlloc arr $ fromGrounds $ weakenVars wTemp sh) $ 
+    , wTemp1 <- wTemp2 .> wTemp =
+      aletUnique lhsTemp1 (desugarAlloc arr $ fromGrounds sh) $
+        aletUnique lhsTemp2 (desugarAlloc arr $ fromGrounds $ weakenVars wTemp sh) $
           alet LeftHandSideUnit
             (alet LeftHandSideUnit
               (mkScan dir (weaken wTemp1 comb) Nothing (weaken wTemp1 i) (ArgArray Out arr (weakenVars wTemp1 sh) (kTemp1 wTemp2)))
               (mkMap (ArgFun $ case mkLHS tp of
                       LHS lhs vars ->
-                        Lam lhs $ Body $ (\f -> apply2 tp f (weakenThroughReindex wTemp1 reindexExp $ 
+                        Lam lhs $ Body $ (\f -> apply2 tp f (weakenThroughReindex wTemp1 reindexExp $
                           weakenE weakenEmpty seed) (expVars vars)) $ weakenThroughReindex wTemp1 reindexExp $ (\(ArgFun f) -> f) comb)
-                     (ArgArray In  arr (weakenVars wTemp1 sh) (kTemp1 wTemp2)) 
+                     (ArgArray In  arr (weakenVars wTemp1 sh) (kTemp1 wTemp2))
                      (ArgArray Out arr (weakenVars wTemp1 sh) (kTemp2 weakenId)))) $
             mkAppend
               (case dir of
@@ -228,7 +228,7 @@ instance DesugarAcc InterpretOp where
                 RightToLeft -> Right)
               1
               (ArgFun $ Lam (LeftHandSideWildcard $ shapeType shr) $ Body $ weakenThroughReindex wTemp1 reindexExp seed)
-              (ArgArray In arr (weakenVars wTemp1 sh) (kTemp2 weakenId)) 
+              (ArgArray In arr (weakenVars wTemp1 sh) (kTemp2 weakenId))
               (weaken wTemp1 o)
 
             -- mkBackpermuteOr 
@@ -298,17 +298,14 @@ instance PrettyKernel InterpretKernel where
 -- (Note that Labels are uniquely identified by an Int, the parent just gives extra information)
 -- Use Output = -3 for 'cannot be fused with consumer', as that is more difficult to express (we don't know the consumer yet)
 -- We restrict all the Inputs to >= -2.
-data InterpreterVariables = Order InOut Label
-                          | DimensionsPerThread InOut Label
+data InterpreterVariables = DimensionsPerThread InOut Label
                           | IdleThreads InOut Side Label
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 data InOut = InArr | OutArr
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 data Side = Left | Right
-  deriving (Eq, Ord)
-pattern InDir, OutDir :: Label -> Graph.Var InterpretOp
-pattern InDir  l = BackendSpecific (Order  InArr l)
-pattern OutDir l = BackendSpecific (Order OutArr l)
+  deriving (Eq, Ord, Show)
+
 
 instance MakesILP InterpretOp where
   type BackendVar InterpretOp = InterpreterVariables
@@ -320,8 +317,8 @@ instance MakesILP InterpretOp where
   -- this ensures that e.g. multiple inputs of the same array
   -- in different orders won't fuse horizontally, and that
   -- the correct one will be used by each consumer
-  labelLabelledArg solution l (L arg@(ArgArray In  _ _ _) al) = LOp arg al . Just $ (solution M.! Order  InArr l, (solution M.! DimensionsPerThread  InArr l, solution M.! IdleThreads  InArr Left l, solution M.! IdleThreads  InArr Right l))
-  labelLabelledArg solution l (L arg@(ArgArray Out _ _ _) al) = LOp arg al . Just $ (solution M.! Order OutArr l, (solution M.! DimensionsPerThread OutArr l, solution M.! IdleThreads OutArr Left l, solution M.! IdleThreads OutArr Right l))
+  labelLabelledArg solution l (L arg@(ArgArray In  _ _ _) al) = LOp arg al . Just $ (solution M.! Graph.InDir  l, (solution M.! BackendSpecific (DimensionsPerThread  InArr l), solution M.! BackendSpecific (IdleThreads  InArr Left l), solution M.! BackendSpecific (IdleThreads  InArr Right l)))
+  labelLabelledArg solution l (L arg@(ArgArray Out _ _ _) al) = LOp arg al . Just $ (solution M.! Graph.OutDir l, (solution M.! BackendSpecific (DimensionsPerThread OutArr l), solution M.! BackendSpecific (IdleThreads OutArr Left l), solution M.! BackendSpecific (IdleThreads OutArr Right l)))
   labelLabelledArg _ _ (L arg al) = LOp arg al Nothing
 
   getClusterArg (LOp ArgArray{} _ (Just (_, (x, y, z)))) = ArrayInfo x y z
@@ -331,7 +328,7 @@ instance MakesILP InterpretOp where
   getClusterArg (LOp _ _ (Just _))         = error "TODO: make a nice error"
 
   finalize = foldMap $ \l -> timesN (manifest l) .>. c (OutDir l)
-  
+
   mkGraph IBackpermute (_ :>: ((L _ (_, Set.toList -> lIns)) :>: _ :>: ArgsNil)) l@(Label i _) =
     Graph.Info
       mempty
@@ -382,7 +379,7 @@ instance MakesILP InterpretOp where
         <> c (BackendSpecific $ IdleThreads InArr Right l) .==. c (BackendSpecific $ IdleThreads OutArr Right l)
         <> c (BackendSpecific $ DimensionsPerThread InArr l) .+. int 1 .==. c (BackendSpecific $ DimensionsPerThread OutArr l))
       (defaultBounds l)
-  
+
   mkGraph (IScan1 _ _) (_ :>: L _ (_, Set.toList -> lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
@@ -393,7 +390,7 @@ instance MakesILP InterpretOp where
         <> c (BackendSpecific $ IdleThreads InArr Right l) .==. c (BackendSpecific $ IdleThreads OutArr Right l)
         <> c (BackendSpecific $ DimensionsPerThread InArr l) .+. int 1 .==. c (BackendSpecific $ DimensionsPerThread OutArr l))
       (defaultBounds l)
-  
+
   mkGraph (IAppend side n) (_ :>: L _ (_, Set.toList -> lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
@@ -431,7 +428,7 @@ inputConstraints l = foldMap $ \lIn ->
     <> (-1) .*. timesN (fused lIn l) .<=. c (BackendSpecific $ IdleThreads InArr Right l) .-. c (BackendSpecific $ IdleThreads OutArr Right lIn)
 
 defaultBounds :: Label -> Bounds InterpretOp
-defaultBounds l = lower (-2) (InDir l) <> lower (-2) (OutDir l) 
+defaultBounds l = lower (-2) (InDir l) <> lower (-2) (OutDir l)
                 <> lower 0 (BackendSpecific $ IdleThreads InArr Left l)
                 <> lower 0 (BackendSpecific $ IdleThreads InArr Right l)
                 <> lower 0 (BackendSpecific $ IdleThreads OutArr Left l)
@@ -593,9 +590,9 @@ instance EvalOp InterpretOp where
   type Embed' InterpretOp = Identity
   type EnvF InterpretOp = Identity
 
-  evalOp _ IMap env (Push (Push _ (BAE (Value' (Identity x) (Shape' shr sh)) _)) (BAE f _)) = 
+  evalOp _ IMap env (Push (Push _ (BAE (Value' (Identity x) (Shape' shr sh)) _)) (BAE f _)) =
     pure $ Push Empty (FromArg $ Value' (Identity $ evalFun f (evalArrayInstrDefault env) x) (Shape' shr sh))
-  evalOp _ IBackpermute _ (Push (Push (Push _ (BAE sh _)) (BAE (Value' x _) _)) _) = 
+  evalOp _ IBackpermute _ (Push (Push (Push _ (BAE sh _)) (BAE (Value' x _) _)) _) =
     pure $ Push Empty (FromArg $ Value' x sh) -- We evaluated the backpermute at the start already, now simply relabel the shape info
   evalOp _ _ _ _ = undefined
 

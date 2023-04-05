@@ -21,7 +21,7 @@
 --
 
 module Data.Array.Accelerate.Pretty.Schedule.Uniform (
-
+  prettySArg, prettySArgs, prettyKernelFun
 ) where
 
 import Data.Array.Accelerate.Pretty.Exp
