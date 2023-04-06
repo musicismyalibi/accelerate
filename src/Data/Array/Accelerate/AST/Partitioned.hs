@@ -4,16 +4,13 @@
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeFamilies          #-}
+
 {-# LANGUAGE TypeFamilyDependencies#-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -46,7 +43,7 @@ import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
 import Data.Array.Accelerate.Representation.Array (Array, Buffers, ArrayR (ArrayR), rnfArrayR)
 import qualified Data.Array.Accelerate.AST.Environment as Env
 import Data.Array.Accelerate.AST.LeftHandSide
-import Data.Array.Accelerate.Representation.Shape (ShapeR, shapeType)
+import Data.Array.Accelerate.Representation.Shape (ShapeR)
 import Data.Type.Equality
 import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.Trafo.Operation.LiveVars
@@ -241,6 +238,7 @@ instance NFData (ConsBuffers f e exs xs) where
   rnf ConsUnit = ()
   rnf ConsSingle = ()
   rnf (ConsPair l r) = rnf l `seq` rnf r
+  rnf (ConsUnitFusedAway c) = rnf c
 
 pattern ExpArg :: ()
                 => forall e args body scope. (args' ~ (e -> args), body' ~ (body, e), scope' ~ (scope, e))
@@ -298,7 +296,7 @@ takeIdx (There t) = SuccIdx $ takeIdx t
 -- A cluster from a single node
 -- TODO just use conscluster for this
 unfused :: op args -> BackendCluster op args -> Args env args -> Cluster op args
-unfused op b args = undefined -- iolhs args $ \io lhs -> Cluster b $ Cluster' io (Bind lhs op None)
+unfused = undefined -- iolhs args $ \io lhs -> Cluster b $ Cluster' io (Bind lhs op None)
 
 -- iolhs :: Args env args -> (forall x y. ClusterIO args x y -> LeftHandSideArgs args x y -> r) -> r
 -- iolhs ArgsNil                     f =                       f  Empty            Base
@@ -548,9 +546,9 @@ instance ShrinkArg (BackendClusterArg op) => SLVOperation (Cluster op) where
       wTakeO (UselessArg d) t k = wTakeO d t $ \d' t' -> k (UselessArg d') (There t')
 
       diffAST :: SLVDiff i o i' o' -> ClusterAST op i o -> ClusterAST op i' o'
-      diffAST Same ast = ast
+      diffAST Same a = a
       diffAST diff None = wNone diff None
-      diffAST diff (Bind lhs op ast) = wLHS diff lhs $ \diff' lhs' -> Bind lhs' op (diffAST diff' ast)
+      diffAST diff (Bind lhs op a) = wLHS diff lhs $ \diff' lhs' -> Bind lhs' op (diffAST diff' a)
 
       wLHS :: SLVDiff i o i' o' -> LeftHandSideArgs body i scope -> (forall scope'. SLVDiff scope o scope' o' -> LeftHandSideArgs body i' scope' -> r) -> r
       wLHS Same lhs k = k Same lhs

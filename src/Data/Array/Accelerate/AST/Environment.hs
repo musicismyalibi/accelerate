@@ -1,4 +1,3 @@
-{-# LANGUAGE EmptyCase           #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE LambdaCase          #-}
@@ -9,6 +8,7 @@
 {-# LANGUAGE TypeOperators       #-}
 {-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TupleSections #-}
 -- |
 -- Module      : Data.Array.Accelerate.AST.Environment
 -- Copyright   : [2008..2020] The Accelerate Team
@@ -255,7 +255,7 @@ prjUpdate' f (SuccIdx idx) (Push env v) = (Push env' v, a)
   where (env', a) = prjUpdate' f idx env
 
 prjReplace' :: Idx env t -> f t -> Env f env -> (Env f env, f t)
-prjReplace' ix val = prjUpdate' (\v -> (val, v)) ix
+prjReplace' ix val = prjUpdate' (val, ) ix
 
 update' :: (f t -> f t) -> Idx env t -> Env f env -> Env f env
 update' f ZeroIdx       (Push env v) = Push env (f v)
