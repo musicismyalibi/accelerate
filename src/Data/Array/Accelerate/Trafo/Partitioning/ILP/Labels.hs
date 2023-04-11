@@ -64,6 +64,7 @@ data Label = Label
 makeLenses ''Label
 instance Show Label where
   show = ("Label"<>) . show . _labelId
+  -- show (Label i p) = "Label" <> show i <> "-{" <> show p <> "} "
 instance Eq Label where
   (Label x a) == (Label y b)
     | x == y = if a == b then True else error $ "same labelId but different parents: " <> show a <> " - " <> show b

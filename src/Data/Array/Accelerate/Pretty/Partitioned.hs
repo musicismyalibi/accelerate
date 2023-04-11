@@ -227,6 +227,7 @@ pRemoveAts' :: ConsBuffers (Sh sh) e env env1 -> Pretty.Val env -> Pretty.Val en
 pRemoveAts' ConsUnit env = env
 pRemoveAts' ConsSingle (Pretty.Push env _) = env
 pRemoveAts' (ConsPair l r) env = pRemoveAts' l $ pRemoveAts' r env
+pRemoveAts' (ConsUnitFusedAway x) (Pretty.Push env y) = Pretty.Push (pRemoveAts' x env) y
 
 pWriteAt :: Take t env' env -> Maybe Adoc -> PartialVal env -> PartialVal env'
 pWriteAt t Nothing  = pSkipAt t
@@ -275,6 +276,7 @@ pSkips :: ConsBuffers f t env env' -> PartialVal env' -> PartialVal env
 pSkips ConsUnit = id
 pSkips ConsSingle = PSkip
 pSkips (ConsPair l r) = pSkips r . pSkips l
+pSkips (ConsUnitFusedAway x) = \(PPush env y) -> PPush (pSkips x env) y
 
 pEnvTail :: PartialVal (env, t) -> PartialVal env
 pEnvTail PEnd          = PEnd

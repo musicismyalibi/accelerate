@@ -368,7 +368,6 @@ library
         , unique
         , unordered-containers          >= 0.2
         , vector                        >= 0.10
-
   exposed-modules:
         -- The core language and reference implementation
         Data.Array.Accelerate
@@ -721,6 +720,12 @@ test-suite doctest
           base                          >= 4.10
         , accelerate
         , doctest                       >= 0.11
+        , binary
+        , fclabels
+        , normaldistribution
+        , array
+        , random
+        , directory
 
   ghc-options:
         -Wall

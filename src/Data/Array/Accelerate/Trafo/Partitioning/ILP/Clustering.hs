@@ -184,7 +184,7 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
                             @(PreOpenAcc (Cluster op) env _)
                             facc)
          CWhl env' c b i u -> case (subcluster c, subcluster b) of
-           (~[NonExecL c'], ~[NonExecL b']) -> case (makeASTF env c' prev, makeASTF env b' prev) of
+           (findTopOfF -> NonExecL c', findTopOfF -> NonExecL b') -> case (makeASTF env c' prev, makeASTF env b' prev) of
             (Exists cfun, Exists bfun) -> Exists $ Awhile
               u
               -- [See NOTE unsafeCoerce result type]
@@ -238,6 +238,14 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
         Exists fun -> Exists $ Alam lhs' fun
       NotFold {} -> error "wrong type: acc"
       _ -> error "not a notfold"
+
+    findTopOfF :: [ClusterL] -> ClusterL
+    findTopOfF [] = error "empty list"
+    findTopOfF [x] = x
+    findTopOfF (x@(NonExecL l):xs) = case construct M.! l of
+      CBod -> findTopOfF xs
+      CFun _ l' -> findTopOfF $ filter (\(NonExecL l'') -> l'' /= l') xs ++ [x]
+      -- findTopOfF $ filter (\(NonExecL l) -> Just l /= p) xs ++ [x]
 
     -- do the topological sorting for each set
     -- TODO: add 'backend-specific' edges to the graph for sorting, see 3.3.1 in the PLDI paper
