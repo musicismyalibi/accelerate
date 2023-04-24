@@ -36,6 +36,7 @@ import Data.Type.Equality
 import Unsafe.Coerce (unsafeCoerce)
 import qualified Data.Functor.Const as C
 import Data.Array.Accelerate.Array.Buffer (Buffers)
+import qualified Debug.Trace
 
 {-
 Label is for each AST node: every exec, every let, every branch of control flow, etc has a unique label.
@@ -82,7 +83,13 @@ data ALabel t where
   Arr :: ELabelTup e -- elabel of buffer
       -> ALabel (m sh e) -- only matches on arrays, but supports In, Out and Mut
   NotArr :: ALabel (t e) -- matches on `Var' e`, `Exp' e` and `Fun' e` (is typecorrect on arrays, but wish it wasn't)
--- deriving instance Show (ALabel t)
+deriving instance Show (ALabel t)
+
+instance Show (TupR (C.Const ELabel) a) where
+  show TupRunit       = "()"
+  show (TupRsingle t) = show t
+  show (TupRpair a b) = "(" ++ show a ++ "," ++ show b ++ ")"
+
 
 matchALabel :: ALabel (m sh s) -> ALabel (m' sh' t) -> Maybe ((sh,s) :~: (sh',t))
 matchALabel (Arr e1) (Arr e2)
@@ -206,8 +213,13 @@ getLabelsArg (ArgFun fun)                  env = getLabelsFun fun    env
 
 -- The comment above is outdated, but I'm not sure what is going on here anymore. What are the two types of return arguments from getLabelsTup? Does it make sense that a TupRsingle always gives Right?
 -- ALabels shouldn't contain a single ELabel for arrays, but a TupR of ELabels (one for each buffer)!
-getLabelsArg (ArgArray _ _ _ buVars) env = let (Arr x,             buLabs) = getLabelsTup buVars env
-                                           in  (unBuffers $ Arr x, buLabs)
+
+-- another update: adding the labels from the shapes now, and I see that there are tupr's of elabs already.
+-- Maybe we should only return the sh labels for input arrays?
+getLabelsArg (ArgArray _ _ shVars buVars) env = let (Arr x,             buLabs         ) = getLabelsTup buVars env
+                                                    (Arr y,                      shLabs) = getLabelsTup shVars env
+                                                in ( --Debug.Trace.trace ("\n\ngetLabelsArg: buffer alabel:" <> show x <> "\nshape alabel:" <> show y <> "\nbuf labels:" <> show buLabs <> "\nshape labels:" <> show shLabs) $ 
+                                                  unBuffers $ Arr x, buLabs <> shLabs)
 
 getLabelsTup :: TupR (Var a env) b -> LabelEnv env -> ALabels (m sh b)
 getLabelsTup TupRunit         _   = (Arr TupRunit, mempty)

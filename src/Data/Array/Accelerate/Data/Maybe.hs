@@ -1,4 +1,5 @@
 {-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
@@ -56,6 +57,10 @@ import Data.Function                                                ( (&) )
 import Data.Maybe                                                   ( Maybe(..) )
 import Prelude                                                      ( ($), (.) )
 
+#ifdef ACCELERATE_INTERNAL_CHECKS
+import Data.Typeable
+#endif
+  
 
 -- | Returns 'True' if the argument is 'Nothing'
 --
@@ -98,7 +103,11 @@ maybe d f = match \case
 -- | Extract from an array all of the 'Just' values, together with a segment
 -- descriptor indicating how many elements along each dimension were returned.
 --
-justs :: (Shape sh, Slice sh, Elt a)
+justs :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh, 
+#endif
+  Shape sh, Slice sh, Elt a)
       => Acc (Array (sh:.Int) (Maybe a))
       -> Acc (Vector a, Array sh Int)
 justs xs = compact (map isJust xs) (map fromJust xs)

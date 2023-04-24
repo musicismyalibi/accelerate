@@ -8,6 +8,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE StandaloneDeriving       #-}
 {-# LANGUAGE ViewPatterns        #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
@@ -20,9 +21,7 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.Pretty.Partitioned (
-
-) where
+module Data.Array.Accelerate.Pretty.Partitioned where
 
 import Data.Array.Accelerate.Pretty.Exp hiding (Val(..))
 import qualified Data.Array.Accelerate.Pretty.Exp as Pretty
@@ -74,7 +73,7 @@ clusterEnv env = \cio args -> (input cio args, output cio args)
       = Pretty.Push (input cio as) (prettyArg env a)
     input (ExpPut' cio) (a :>: as)
       = Pretty.Push (input cio as) (prettyArg env a)
-    input (Trivial io) (_ :>: as) = input io as
+    input (Trivial io) (a :>: as) = Pretty.Push (input io as) (prettyArg env a)
 
     output :: ClusterIO t input' output' -> Args env t -> PartialVal output'
     output Empty ArgsNil
@@ -89,8 +88,8 @@ clusterEnv env = \cio args -> (input cio args, output cio args)
       = PPush (output cio as) (prettyArg env a)
     output (ExpPut' cio) (a :>: as)
       = PPush (output cio as) (prettyArg env a)
-    output (Trivial io) (_ :>: as)
-      = output io as
+    output (Trivial io) (a :>: as)
+      = PPush (output io as) (prettyArg env a)
 
 -- The pretty printer gets an environment with Adocs of input variables (Val env, from clusterEnv)
 -- which is propagated in the same flow as the cluster.
@@ -148,7 +147,7 @@ unCons ConsSingle (Pretty.Push env doc) = (doc, env)
 unCons (ConsPair l r) env = let (x, env') = unCons r env
                                 (y, env'') = unCons l env'
                             in  (x <> y, env'')
-unCons (ConsUnitFusedAway cb) (Pretty.Push env doc) = second (`Pretty.Push` doc) $ unCons cb env
+-- unCons (ConsUnitFusedAway cb) (Pretty.Push env doc) = second (`Pretty.Push` doc) $ unCons cb env
 
 intermediate :: Modifier m -> Int -> Adoc -> Adoc
 intermediate m idx sh = group $ vsep [prettyModifier m, "(" <> sh <> ")", "%" <> pretty idx]
@@ -227,7 +226,7 @@ pRemoveAts' :: ConsBuffers (Sh sh) e env env1 -> Pretty.Val env -> Pretty.Val en
 pRemoveAts' ConsUnit env = env
 pRemoveAts' ConsSingle (Pretty.Push env _) = env
 pRemoveAts' (ConsPair l r) env = pRemoveAts' l $ pRemoveAts' r env
-pRemoveAts' (ConsUnitFusedAway x) (Pretty.Push env y) = Pretty.Push (pRemoveAts' x env) y
+-- pRemoveAts' (ConsUnitFusedAway x) (Pretty.Push env y) = Pretty.Push (pRemoveAts' x env) y
 
 pWriteAt :: Take t env' env -> Maybe Adoc -> PartialVal env -> PartialVal env'
 pWriteAt t Nothing  = pSkipAt t
@@ -271,12 +270,16 @@ data PartialVal env where
   PEnd  ::                           PartialVal env
   PSkip :: PartialVal env         -> PartialVal (env, t)
   PPush :: PartialVal env -> Adoc -> PartialVal (env, t)
+deriving instance Show (PartialVal env)
 
 pSkips :: ConsBuffers f t env env' -> PartialVal env' -> PartialVal env
 pSkips ConsUnit = id
 pSkips ConsSingle = PSkip
 pSkips (ConsPair l r) = pSkips r . pSkips l
-pSkips (ConsUnitFusedAway x) = \(PPush env y) -> PPush (pSkips x env) y
+-- pSkips (ConsUnitFusedAway x) = \case
+--   PPush env y -> PPush (pSkips x env) y
+--   PSkip env -> PSkip (pSkips x env)
+--   PEnd -> error "huh"
 
 pEnvTail :: PartialVal (env, t) -> PartialVal env
 pEnvTail PEnd          = PEnd

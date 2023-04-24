@@ -140,6 +140,9 @@ import Data.Array.Accelerate.Data.Bits
 import Lens.Micro                                                   ( Lens', (&), (^.), (.~), (+~), (-~), lens, over )
 import Prelude                                                      ( (.), ($), Maybe(..), const, id, flip )
 
+#ifdef ACCELERATE_INTERNAL_CHECKS
+import Data.Typeable
+#endif
 
 -- $setup
 -- >>> :seti -XFlexibleContexts
@@ -659,7 +662,11 @@ unzip9 xs = ( map get1 xs, map get2 xs, map get3 xs
 -- Scalar Z [1225.0]
 --
 foldAll
-    :: (Shape sh, Elt a)
+    :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh,
+#endif
+  Shape sh, Elt a)
     => (Exp a -> Exp a -> Exp a)
     -> Exp a
     -> Acc (Array sh a)
@@ -671,7 +678,11 @@ foldAll f e arr = fold f e (flatten arr)
 -- function.
 --
 fold1All
-    :: (Shape sh, Elt a)
+    :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh,
+#endif
+  Shape sh, Elt a)
     => (Exp a -> Exp a -> Exp a)
     -> Acc (Array sh a)
     -> Acc (Scalar a)
@@ -1424,7 +1435,11 @@ index1' i = lift (Z :. fromIntegral i)
 -- | Flatten the given array of arbitrary dimension into a one-dimensional
 -- vector. As with 'reshape', this operation performs no work.
 --
-flatten :: forall sh e. (Shape sh, Elt e) => Acc (Array sh e) -> Acc (Vector e)
+flatten :: forall sh e. (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh, 
+#endif
+  Shape sh, Elt e) => Acc (Array sh e) -> Acc (Vector e)
 flatten a
   | Just Refl <- matchShapeType @sh @DIM1
   = a
@@ -1631,7 +1646,11 @@ concatOn dim xs ys =
 -- >>> run $ filter odd (use mat)
 -- (Vector (Z :. 20) [1,3,5,7,9,1,1,1,1,1,1,3,5,7,9,11,13,15,17,19],Vector (Z :. 4) [5,5,0,10])
 --
-filter :: (Shape sh, Elt e)
+filter :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh, 
+#endif
+  Shape sh, Elt e)
        => (Exp e -> Exp Bool)
        -> Acc (Array (sh:.Int) e)
        -> Acc (Vector e, Array sh Int)
@@ -1646,7 +1665,12 @@ filter p arr = compact (map p arr) arr
 -- | As 'filter', but with separate arrays for the data elements and the
 -- flags indicating which elements of that array should be kept.
 --
-compact :: forall sh e. (Shape sh, Elt e)
+compact :: forall sh e. (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh,
+ 
+#endif
+  Shape sh, Elt e)
         => Acc (Array (sh:.Int) Bool)
         -> Acc (Array (sh:.Int) e)
         -> Acc (Vector e, Array sh Int)

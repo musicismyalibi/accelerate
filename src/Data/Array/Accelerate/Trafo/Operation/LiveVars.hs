@@ -50,6 +50,11 @@ import Data.List ( foldl' )
 import Data.Maybe
 import Data.Type.Equality
 
+--TODO remove
+-- stronglyLiveVariables, stronglyLiveVariablesFun :: a -> a
+-- stronglyLiveVariables = id
+-- stronglyLiveVariablesFun = id
+
 stronglyLiveVariablesFun :: SLVOperation op => PreOpenAfun op () t -> PreOpenAfun op () t
 stronglyLiveVariablesFun acc = acc' ReEnvEnd
   where

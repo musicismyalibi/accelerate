@@ -1321,7 +1321,7 @@ rnfSArg (SArgBuffer mod' var) = mod' `seq` rnfGroundVar var
 
 rnfInputOutputR :: InputOutputR input output -> ()
 rnfInputOutputR (InputOutputRpair io1 io2) = rnfInputOutputR io1 `seq` rnfInputOutputR io2
-rnfInputOutputR _ = ()
+rnfInputOutputR _ = () -- all other options have no information
 
 {-
 -- * Compilation from PartitionedAcc to UniformSchedule

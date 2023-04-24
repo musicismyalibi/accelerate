@@ -32,10 +32,10 @@ module Data.Array.Accelerate.AST.Idx (
 
 import Language.Haskell.TH.Extra
 import Control.DeepSeq
-import Data.Kind as Kind
+import Data.Type.Equality ((:~:)(Refl))
 
 #ifndef ACCELERATE_INTERNAL_CHECKS
-import Data.Type.Equality ((:~:)(Refl))
+import Data.Kind as Kind (Type)
 import Unsafe.Coerce (unsafeCoerce)
 #endif
 

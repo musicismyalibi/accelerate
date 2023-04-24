@@ -67,6 +67,8 @@ import Data.Text.Lazy.Builder
 import qualified Data.Array.Accelerate.AST.Operation as Operation
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
 import Data.Array.Accelerate.Pretty.Print (configPlain, Val (Empty))
+import qualified Debug.Trace
+import Data.Text.Lazy (unpack)
 
 #ifdef ACCELERATE_DEBUG
 import Formatting

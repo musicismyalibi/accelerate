@@ -105,6 +105,7 @@ import Data.Array.Accelerate.Eval
 import qualified Data.Array.Accelerate.AST.Partitioned as P
 import Data.Functor.Identity
 import Data.Array.Accelerate.Trafo.LiveVars
+import qualified Debug.Trace
 
 data Interpreter
 instance Backend Interpreter where
@@ -112,6 +113,9 @@ instance Backend Interpreter where
   type Kernel Interpreter = InterpretKernel
 
 
+map !?! key = case map M.!? key of
+  Just x -> x
+  Nothing -> Debug.Trace.trace ("error: map "<> show map <> "does not contain key " <> show key) undefined
 
 
 -- Pushes backpermute information through the cluster and stores it in the arguments, for use at the start of the loop (indexing) and in generates.
@@ -160,8 +164,8 @@ instance StaticClusterAnalysis InterpretOp where
   shToVar      (BCA f) = BCA f
   shrinkOrGrow (BCA f) = BCA f
   addTup       (BCA f) = BCA f
-  justUnit = BCA undefined
-
+  unitToVar    (BCA f) = BCA f
+  varToUnit    (BCA f) = BCA f
   def _ _ _ = BCA id
 
 -- we can implement stencils using clamp, mirror or wrap with backpermute and zipwith(map), but for stencils using function we need a little extra.
@@ -315,8 +319,8 @@ instance MakesILP InterpretOp where
   -- this ensures that e.g. multiple inputs of the same array
   -- in different orders won't fuse horizontally, and that
   -- the correct one will be used by each consumer
-  labelLabelledArg solution l (L arg@(ArgArray In  _ _ _) al) = LOp arg al . Just $ (solution M.! Graph.InDir  l, (solution M.! BackendSpecific (DimensionsPerThread  InArr l), solution M.! BackendSpecific (IdleThreads  InArr Left l), solution M.! BackendSpecific (IdleThreads  InArr Right l)))
-  labelLabelledArg solution l (L arg@(ArgArray Out _ _ _) al) = LOp arg al . Just $ (solution M.! Graph.OutDir l, (solution M.! BackendSpecific (DimensionsPerThread OutArr l), solution M.! BackendSpecific (IdleThreads OutArr Left l), solution M.! BackendSpecific (IdleThreads OutArr Right l)))
+  labelLabelledArg solution l (L arg@(ArgArray In  _ _ _) al) = LOp arg al . Just $ (solution !?! Graph.InDir  l, (solution !?! BackendSpecific (DimensionsPerThread  InArr l), solution !?! BackendSpecific (IdleThreads  InArr Left l), solution !?! BackendSpecific (IdleThreads  InArr Right l)))
+  labelLabelledArg solution l (L arg@(ArgArray Out _ _ _) al) = LOp arg al . Just $ (solution !?! Graph.OutDir l, (solution !?! BackendSpecific (DimensionsPerThread OutArr l), solution !?! BackendSpecific (IdleThreads OutArr Left l), solution !?! BackendSpecific (IdleThreads OutArr Right l)))
   labelLabelledArg _ _ (L arg al) = LOp arg al Nothing
 
   getClusterArg (LOp ArgArray{} _ (Just (_, (x, y, z)))) = ArrayInfo x y z
@@ -447,7 +451,10 @@ instance NFData' InterpretOp where
   rnf' (IScan1 dir lookup) = lookup `seq` dir `seq` ()
   rnf' (IFold1 lookup) = lookup `seq` ()
   rnf' (IAppend side n) = side `seq` n `seq` ()
-  rnf' _ = ()
+  rnf' IMap = ()
+  rnf' IBackpermute = ()
+  rnf' IGenerate = ()
+  rnf' IPermute = ()
 
 instance PrettyOp InterpretOp where
   prettyOp IMap         = "map"
@@ -676,7 +683,7 @@ linearIndexToSh (ShapeRsnoc shr) (sh, outer) i = let
 --       pure $ PushFA (Value x outSh) Empty
 --   | otherwise = do -- combine input with output using f
 --       lookupmap <- readIORef lookup
---       let y = lookupmap M.! firstOfRow i sh (idleLeft infoX)
+--       let y = lookupmap !?! firstOfRow i sh (idleLeft infoX)
 --       let z = evalFun f env y x
 --       writeIORef lookup (M.insert (firstOfRow i sh (idleLeft infoX)) z lookupmap)
 --       pure $ PushFA (Value z outSh) Empty
@@ -687,7 +694,7 @@ linearIndexToSh (ShapeRsnoc shr) (sh, outer) i = let
 --       pure $ PushFA (Value x sh) Empty
 --   | otherwise = do -- combine input with previous output using f
 --       lookupmap <- readIORef lookup
---       let y = lookupmap M.! (i - 1)
+--       let y = lookupmap !?! (i - 1)
 --       let z = evalFun f env y x
 --       writeIORef lookup $ M.insert i z lookupmap
 --       pure $ PushFA (Value z sh) Empty

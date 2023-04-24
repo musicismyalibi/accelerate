@@ -789,7 +789,11 @@ matchTypeR = matchTupR matchScalarType
 -- a known branch.
 --
 {-# INLINEABLE matchShapeType #-}
-matchShapeType :: forall s t. (Sugar.Shape s, Sugar.Shape t) => Maybe (s :~: t)
+matchShapeType :: forall s t. (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable s, Typeable t, 
+#endif
+  Sugar.Shape s, Sugar.Shape t) => Maybe (s :~: t)
 matchShapeType
   | Just Refl <- matchShapeR (Sugar.shapeR @s) (Sugar.shapeR @t)
 #ifdef ACCELERATE_INTERNAL_CHECKS

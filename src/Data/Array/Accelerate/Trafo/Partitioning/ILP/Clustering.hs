@@ -13,7 +13,7 @@
 {-# LANGUAGE EmptyCase #-}
 
 -- _Significantly_ speeds up compilation of this file, but at an obvious cost!
--- Even in GHC 9.0.1, which has Lower Your Guards, these checks take some time (though no longer as long).
+-- Even in GHC 9.0.1, which has Lower Your Guards, these checks take some time (though no longer quite as long).
 -- Recommended to disable these options when working on this file, and restore them when you're done.
 {-# OPTIONS_GHC 
   -Wno-overlapping-patterns 
@@ -50,6 +50,7 @@ import Data.Array.Accelerate.Trafo.Operation.Substitution (weaken)
 import Data.Functor.Identity
 import Data.Array.Accelerate.Pretty.Exp (IdxF(..))
 import qualified Data.Tree as T
+import qualified Debug.Trace
 
 -- "open research question"
 -- -- Each set of ints corresponds to a set of Constructions, which themselves contain a set of ints (the things they depend on).
@@ -66,6 +67,13 @@ Within each cluster (Labels), we do a topological sort using the edges in Graph
 Data.Graph (containers) has a nice topological sort.
 -}
 
+
+-- map M.! key = case map M.!? key of
+--   Just x -> x
+--   Nothing -> Debug.Trace.trace ("error: map "<> show map <> "does not contain key " <> show key) undefined
+
+-- instance Show (Exists a) where
+--   show (Exists x) = "exis"
 
 -- Note that the return type `a` is not existentially qualified: The caller of this function tells
 -- us what the result type should be (namely, what it was before fusion). We use unsafe tricks to
@@ -184,7 +192,7 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
                             @(PreOpenAcc (Cluster op) env _)
                             facc)
          CWhl env' c b i u -> case (subcluster c, subcluster b) of
-           (findTopOfF -> NonExecL c', findTopOfF -> NonExecL b') -> case (makeASTF env c' prev, makeASTF env b' prev) of
+           (findTopOfF -> c', findTopOfF -> b') -> case (makeASTF env c' prev, makeASTF env b' prev) of
             (Exists cfun, Exists bfun) -> Exists $ Awhile
               u
               -- [See NOTE unsafeCoerce result type]
@@ -239,13 +247,15 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
       NotFold {} -> error "wrong type: acc"
       _ -> error "not a notfold"
 
-    findTopOfF :: [ClusterL] -> ClusterL
+    findTopOfF :: [ClusterL] -> Label
     findTopOfF [] = error "empty list"
-    findTopOfF [x] = x
+    findTopOfF [NonExecL x] = x
     findTopOfF (x@(NonExecL l):xs) = case construct M.! l of
       CBod -> findTopOfF xs
       CFun _ l' -> findTopOfF $ filter (\(NonExecL l'') -> l'' /= l') xs ++ [x]
+      _ -> error "should be a function"
       -- findTopOfF $ filter (\(NonExecL l) -> Just l /= p) xs ++ [x]
+    findTopOfF _ = error "should be a function"
 
     -- do the topological sorting for each set
     -- TODO: add 'backend-specific' edges to the graph for sorting, see 3.3.1 in the PLDI paper
@@ -397,7 +407,7 @@ consInArg :: MakesILP op
            -> r)
          -> r
 consInArg a@(LOp (ArgArray In (ArrayR _ TupRunit) _ _) _ _) ltot lhs ast io k =
-  k (a:>:ltot) ast (Reqr TupRunit TupRunit lhs) (Trivial io)
+  k (a:>:ltot) (weakenAST ast) (Triv lhs) (Trivial io)
 consInArg (LOp (ArgArray In (ArrayR sh (TupRpair l r)) sh' (TupRpair bufL bufR)) (Arr (TupRpair el er), _) b) ltot lhs ast io k =
   consInArg (LOp (ArgArray In (ArrayR sh l) sh' bufL) (Arr el, mempty) b) ltot lhs ast io $
     \ltot' ast' lhs' io' ->
@@ -415,17 +425,25 @@ consInArg _ _ _ _ _ _ = error "impossible combination of TypeR, ALabels and TupR
 
 -- Only works if the top of the lhsargs only contains Reqr and Ignr! This is the case in @consInArg@
 squish :: LeftHandSideArgs (In sh b -> In sh a -> args) i o -> LeftHandSideArgs (In sh (a,b) -> args) i o
-squish (Ignr lhs) = Ignr (squish lhs)
-squish (Reqr t1 t2 lhs) = case go lhs of
-  Reqr t3 t4 lhs' -> Reqr (TupRpair t3 t1) (TupRpair t4 t2) lhs'
+squish = \case
+  (Ignr lhs) -> Ignr (squish lhs)
+  (Reqr t1 t2 lhs) -> case go lhs of
+    Left (Reqr t3 t4 lhs') -> Reqr (TupRpair t3 t1) (TupRpair t4 t2) lhs'
+    Right (Refl, lhs') -> Reqr (TupRpair TupRunit t1) (TupRpair TupRunit t2) lhs'
+    _ -> error "go should always give a Reqr/triv"
+  (Triv lhs) -> case go lhs of
+    Left (Reqr t1 t2 lhs') -> Ignr $ Reqr (TupRpair t1 TupRunit) (TupRpair t2 TupRunit) lhs'
+    Right (Refl, _) -> error "change type of Triv to support this"
+  _ -> error "squish encountered non-reqr, non-ignr, non-triv"
   where
-    -- search for the second reqr and weaken it up above the ignrs
-    go :: LeftHandSideArgs (In sh a -> args) i o -> LeftHandSideArgs (In sh a -> args) i o
-    go (Reqr a b c) = Reqr a b c
+    -- search for the second reqr and weaken it up above the ignrs, or IGNoRe the Triv
+    go :: LeftHandSideArgs (In sh a -> args) i o -> Either (LeftHandSideArgs (In sh a -> args) i o) (a:~:(), LeftHandSideArgs args i o)
+    go (Reqr a b c) = Left $ Reqr a b c
+    go (Triv lhs') = Right (Refl, Ignr lhs')
     go (Ignr lhs') = case go lhs' of
-      Reqr a b lhs'' -> Reqr (mapTupR succIdxF a) (mapTupR succIdxF b) $ Ignr lhs''
-    go _ = error "squish encountered non-reqr and non-ignr"
-squish _ = error "squish encountered non-reqr and non-ignr"
+      Left (Reqr a b lhs'') -> Left $ Reqr (mapTupR succIdxF a) (mapTupR succIdxF b) $ Ignr lhs''
+      Right (Refl, lhs'') -> Right (Refl, Ignr lhs'')
+      _ -> error "go should always give a reqr/triv"
 
 
 consOutArg :: MakesILP op
@@ -442,13 +460,20 @@ consOutArg :: MakesILP op
               -> r)
            -> r
 consOutArg a@(LOp (ArgArray Out (ArrayR _ TupRunit) _ _) _ _) ltot lhs ast io k =
-  k (a:>:ltot) ast (Make TakeUnit ConsUnit lhs) (Trivial io)
+  addOutput a ltot ast io lhs $ \ast' io' ltot' lhs' ->
+    k ltot' ast' lhs' io'
 consOutArg (LOp (ArgArray Out (ArrayR sh (TupRpair l r)) sh' (TupRpair bufL bufR)) (Arr (TupRpair el er), _) b) ltot lhs ast io k =
-  consOutArg (LOp (ArgArray Out (ArrayR sh l) sh' bufL) (Arr el, mempty) b) ltot lhs ast io $
-    \ltot' ast' lhs' io' ->
-      consOutArg (LOp (ArgArray Out (ArrayR sh r) sh' bufR) (Arr er, mempty) b) ltot' lhs' ast' io' $
-        \ltot'' ast'' (Make t1 t2 (Make t3 t4 lhs'')) io'' ->
-          k ltot'' ast'' (Make (TakePair t3 t1) (ConsPair t4 t2) lhs'') io''
+  case (l,r) of
+    (TupRunit, TupRunit) -> error "change Triv's type to support this"
+    (TupRunit, _) -> consOutArg (LOp (ArgArray Out (ArrayR sh r) sh' bufR) (Arr er, mempty) b) ltot lhs ast io $
+      \ltot'' ast'' (Make t1 t2 lhs'') io'' -> k ltot'' ast'' (Make (TakePair TakeUnit t1) (ConsPair ConsUnit t2) lhs'') io'' 
+    (_, TupRunit) -> consOutArg (LOp (ArgArray Out (ArrayR sh l) sh' bufL) (Arr el, mempty) b) ltot lhs ast io $
+      \ltot'' ast'' (Make t1 t2 lhs'') io'' -> k ltot'' ast'' (Make (TakePair t1 TakeUnit) (ConsPair t2 ConsUnit) lhs'') io''
+    _ -> consOutArg (LOp (ArgArray Out (ArrayR sh l) sh' bufL) (Arr el, mempty) b) ltot lhs ast io $
+      \ltot' ast' lhs' io' -> 
+        consOutArg (LOp (ArgArray Out (ArrayR sh r) sh' bufR) (Arr er, mempty) b) ltot' lhs' ast' io' $
+          \ltot'' ast'' (Make t1 t2 (Make t3 t4 lhs'')) io'' -> 
+            k ltot'' ast'' (Make (TakePair t3 t1) (ConsPair t4 t2) lhs'') io''
 consOutArg a@(LOp (ArgArray Out (ArrayR _ (TupRsingle _)) _ _) (Arr (TupRsingle (C.Const _)), _) _) ltot lhs ast io k =
   addOutput a ltot ast io lhs $ \ast' io' ltot' lhs' ->
     k ltot' ast' lhs' io'
@@ -468,6 +493,8 @@ addOutput :: MakesILP op
              -> LeftHandSideArgs (Out sh e -> added) i' scope'
              -> r)
           -> r
+addOutput a@(LOp (ArgArray Out (ArrayR _ TupRunit) _ _) _ _) ltot ast io lhs k
+  = k (weakenAST ast) (Trivial io) (a :>: ltot) (Triv lhs)
 addOutput a@(LOp (ArgArray Out (ArrayR _ ty) _ _) _ _) ltot ast io lhs k
   | Just r <- checkDiagonalFusion a ltot $ \t -> applyDiagonalFusion t io lhs ty $ \io' lhs' _ -> k ast io' (a :>: foo t ltot) lhs'
   = r -- diagonal fusion
@@ -501,8 +528,10 @@ applyDiagonalFusion :: ()
                        -> Take (Value sh e) i i'
                        -> r)
                     -> r
--- base case
-applyDiagonalFusion Here' (Input io) (Ignr lhs) ty k = k (Output Here SubTupRkeep ty io) (Make (TakeSingle Here) ConsSingle lhs) Here
+-- base cases
+applyDiagonalFusion _ _ _ TupRpair{} _ = error "pair"
+applyDiagonalFusion _ _ _ TupRunit   _ = error "trivial: we don't bother fusing unit arrays, the duplication of shape info gets simplified away later (I think)"
+applyDiagonalFusion Here' (Input io) (Ignr lhs) (TupRsingle ty) k = k (Output Here SubTupRkeep (TupRsingle ty) io) (Make (TakeSingle Here) ConsSingle lhs) Here
 -- recursive cases
 applyDiagonalFusion t io (Make tb1 tb2 lhs) ty k =
   pastOutputs tb1 tb2 t io $ \t' io' iok ->
@@ -515,20 +544,20 @@ applyDiagonalFusion t io (Reqr ti to lhs) ty k =
   applyDiagonalFusion t io lhs ty $ \io' (Make (TakeSingle ts) ConsSingle lhs') t1 ->
     -- these takeStrengthenF's can only fail when this operation was already using its own output
     k io' (Make (TakeSingle ts) ConsSingle $ Reqr (mapTupR (`takeStrengthenF` t1) ti) (mapTupR (`takeStrengthenF` ts) to) lhs') t1
--- Trivial
-applyDiagonalFusion (There' t) (Trivial      io)       lhs  ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make (TakeSingle ts) ConsSingle lhs') t1 ->                       k (Output        a  b c $ Trivial io') (Make (TakeSingle ts) ConsSingle lhs') t1
 -- Ignr:
 applyDiagonalFusion (There' t) (Input        io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ Input   io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (ExpPut       io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ ExpPut  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (VarPut       io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ VarPut  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
+applyDiagonalFusion (There' t) (Trivial      io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ Trivial io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (FunPut       io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ FunPut  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (MutPut       io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ MutPut  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (Output x y z io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 -> ttake a x $ \a' x' -> k (Output a' b c $ Output x' y z  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
 applyDiagonalFusion (There' t) (Vertical x y io) (Ignr lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 -> ttake a x $ \a' x' -> k (Output a' b c $ Vertical x' y  io') (Make (tbThere ts) ConsSingle $ Ignr lhs') (There t1)
--- Adju, EArg, VArg, FArg are the same as Ignr:
+-- Adju, EArg, VArg, FArg are timilar to Ignr:
 applyDiagonalFusion (There' t) (MutPut       io) (Adju lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ MutPut  io') (Make (tbThere ts) ConsSingle $ Adju lhs') (There t1)
 applyDiagonalFusion (There' t) (ExpPut       io) (EArg lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ ExpPut  io') (Make (tbThere ts) ConsSingle $ EArg lhs') (There t1)
 applyDiagonalFusion (There' t) (VarPut       io) (VArg lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ VarPut  io') (Make (tbThere ts) ConsSingle $ VArg lhs') (There t1)
+applyDiagonalFusion (There' t) (Trivial      io) (VArg lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ Trivial io') (Make (tbThere ts) ConsSingle $ VArg lhs') (There t1)
 applyDiagonalFusion (There' t) (FunPut       io) (FArg lhs) ty k = applyDiagonalFusion t io lhs ty $ \(Output a b c io') (Make ts ConsSingle lhs') t1 ->                       k (Output (There a) b c $ FunPut  io') (Make (tbThere ts) ConsSingle $ FArg lhs') (There t1)
 
 applyDiagonalFusion Here' _ _ _ _ = error "This operation wasn't igoring its own output"
@@ -575,12 +604,14 @@ fuseInput x (_ :>: as) (Adju lhs) (MutPut       io) = (\(Reqr a b c) -> Reqr (th
 fuseInput x (_ :>: as) (EArg lhs) (ExpPut'      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ EArg c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (VArg lhs) (ExpPut'      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ VArg c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (FArg lhs) (ExpPut'      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ FArg c) <$> fuseInput x as lhs io
+fuseInput x (_ :>: as) (VArg lhs) (Trivial      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ VArg c) <$> fuseInput x as lhs io
+fuseInput x (_ :>: as) (Triv lhs) (Trivial      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Triv c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (Ignr lhs) (Output _ _ _ io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (Ignr lhs) (Input        io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (Ignr lhs) (MutPut       io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (Ignr lhs) (ExpPut'      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
 fuseInput x (_ :>: as) (Ignr lhs) (Vertical _ _ io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
-fuseInput x (_ :>: as) lhs (Trivial io) = fuseInput x as lhs io
+fuseInput x (_ :>: as) (Ignr lhs) (Trivial      io) = (\(Reqr a b c) -> Reqr (there' a) (there' b) $ Ignr c) <$> fuseInput x as lhs io
 
 -- also peels verticals and trivials
 peelOutputs :: LabelledArgsOp op env total
@@ -592,7 +623,6 @@ peelOutputs :: LabelledArgsOp op env total
               -> LabelledArgsOp op env t'
               -> r)
             -> r
-peelOutputs (_:>:ltot) t1 t2 (Trivial io) k = peelOutputs ltot t1 t2 io k
 peelOutputs ltot TakeUnit ConsUnit io k = k io ltot
 peelOutputs ltot (TakePair l1 r1) (ConsPair l2 r2) io k =
   peelOutputs ltot r1 r2 io $ \io' ltot' ->
@@ -604,6 +634,7 @@ peelOutputs _ TakeUnit     ConsSingle _ _ = error "unit in single"
 peelOutputs _ TakeSingle{} ConsUnit   _ _ = error "unit in single"
 peelOutputs _ TakeSingle{} ConsPair{} _ _ = error "pair in single"
 peelOutputs _ TakePair{}   ConsSingle _ _ = error "pair in single"
+-- peelOutputs _ _ ConsUnitFusedAway{} _ _ = error "impossible here"
 
 -- go past outputs and verticals and trivials, and give a continuation which slaps them back on
 pastOutputs :: TakeBuffers (Value sh) e eo o
@@ -630,11 +661,11 @@ pastOutputs :: TakeBuffers (Value sh) e eo o
               -> r)
             -> r
 -- trivial recursive case, as a warmup to the nested existentials
-pastOutputs tb1 tb2 (There' t) (Trivial io) k =
-  pastOutputs tb1 tb2 t io $ \t' io' iok ->
-    k t' io' $ \t1 t2 io'' t3 k' ->
-      iok t1 t2 io'' t3 $ \t4 io''' t5 t6 tb3 cb ->
-        k' t4 (Trivial io''') t5 t6 tb3 cb
+-- pastOutputs tb1 tb2 (There' t) (Trivial io) k =
+--   pastOutputs tb1 tb2 t io $ \t' io' iok ->
+--     k t' io' $ \t1 t2 io'' t3 k' ->
+--       iok t1 t2 io'' t3 $ \t4 io''' t5 t6 tb3 cb ->
+--         k' t4 (Trivial io''') t5 t6 tb3 cb
 -- takeUnits case, mirror of the trivial case
 pastOutputs TakeUnit ConsUnit t io k =
   k t io $ \t1 t2 io' t3 k' ->

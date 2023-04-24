@@ -138,6 +138,8 @@ fused x y = let x' :-> y' = x -?> y
             in if x' /= y' then c $ Fused x' y' else error $ "reflexive fused variable " <> show x'
 
 data LabelledArgOp op env a = LOp (Arg env a) (ALabels a) (BackendArg op)
+instance Show (LabelledArgOp op env a) where
+  show (LOp _ l _) = show l
 type LabelledArgsOp op env = PreArgs (LabelledArgOp op env)
 
 reindexLabelledArgOp :: Applicative f => ReindexPartial f env env' -> LabelledArgOp op env t -> f (LabelledArgOp op env' t)
@@ -287,6 +289,19 @@ data Construction (op :: Type -> Type) where
   CCmp  :: LabelEnv env -> Exp env a                                                     -> Construction op
   CAlc  :: LabelEnv env -> ShapeR sh -> ScalarType e -> ExpVars env sh                   -> Construction op
   CUnt  :: LabelEnv env -> ExpVar env e                                                  -> Construction op
+instance Show (Construction op) where
+  show CExe{} = "exe"
+  show CExe'{} = "exe'"
+  show CUse{} = "use"
+  show CITE{} = "ite"
+  show CWhl{} = "whl"
+  show CLHS{} = "lhs"
+  show CFun{} = "fun"
+  show CBod{}  = "bod"
+  show CRet{} = "ret"
+  show CCmp{} = "cmp"
+  show CAlc{} = "alc"
+  show CUnt{} = "unt"
 
 backendConstruc :: forall op. (MakesILP op) => Solution op -> Map Label (Construction op) -> Map Label (Construction op)
 backendConstruc sol = M.mapWithKey f
@@ -335,7 +350,7 @@ mkFullGraph :: forall op env a. (MakesILP op)
 mkFullGraph (Exec op args) = do
   l <- freshL
   env <- use lenv
-  lenv %= flip (updateLabelEnv args) l -- replace the labels of the output arrays with l
+  lenv %= flip (updateLabelEnv args) l -- replace the labels of the buffers of output arrays with l
   let labelledArgs = getLabelArgs args env -- uses the old env! Notably, gets the Alloc (or its lhs?) for empty arrays, and the previous writer for Permute
   let    fuseedges = S.map (-?> l) $ getInputArgLabels args env -- add fusible edges to all inputs
   let nonfuseedges = S.map (-?> l) $ getOutputArgLabels args env
@@ -357,6 +372,7 @@ mkFullGraph (Alet LeftHandSideUnit _ bnd scp) = do
 
 -- In contrast to the case above, this case does enforce a strict ordering. Yes, this could prevent fusion that should be legal,
 -- but (I think) not in the shapes that we actually get.
+-- TODO: check somehow whether this orderng can prevent fusion. Think of a different encoding that doesn't?
 -- TODO: check: I think we only ever really generate these non-unit letbindings for binding 1 infusible node (conditional, alloc) at a time?
 -- Could enforce this in the types
 mkFullGraph (Alet (lhs :: GLeftHandSide bnd env env') u bnd scp) = do

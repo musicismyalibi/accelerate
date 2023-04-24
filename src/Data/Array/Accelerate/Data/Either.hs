@@ -1,4 +1,5 @@
 {-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
@@ -55,6 +56,10 @@ import Data.Array.Accelerate.Data.Semigroup
 import Data.Either                                                  ( Either(..) )
 import Prelude                                                      ( (.), ($) )
 
+#ifdef ACCELERATE_INTERNAL_CHECKS
+import Data.Typeable
+#endif
+  
 
 -- | Return 'True' if the argument is a 'Left'-value
 --
@@ -95,7 +100,11 @@ either f g = match \case
 -- with a segment descriptor indicating how many elements along each dimension
 -- were returned.
 --
-lefts :: (Shape sh, Slice sh, Elt a, Elt b)
+lefts :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh, 
+#endif
+  Shape sh, Slice sh, Elt a, Elt b)
       => Acc (Array (sh:.Int) (Either a b))
       -> Acc (Vector a, Array sh Int)
 lefts es = compact (map isLeft es) (map fromLeft es)
@@ -104,7 +113,11 @@ lefts es = compact (map isLeft es) (map fromLeft es)
 -- with a segment descriptor indicating how many elements along each dimension
 -- were returned.
 --
-rights :: (Shape sh, Slice sh, Elt a, Elt b)
+rights :: (
+#ifdef ACCELERATE_INTERNAL_CHECKS
+  Typeable sh, 
+#endif
+  Shape sh, Slice sh, Elt a, Elt b)
        => Acc (Array (sh:.Int) (Either a b))
        -> Acc (Vector b, Array sh Int)
 rights es = compact (map isRight es) (map fromRight es)

@@ -13,6 +13,7 @@
 {-# LANGUAGE TypeOperators         #-}
 {-# OPTIONS_HADDOCK hide #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
+{-# LANGUAGE StandaloneDeriving #-}
 -- |
 -- Module      : Data.Array.Accelerate.AST.Operation
 -- Copyright   : [2008..2020] The Accelerate Team
@@ -286,6 +287,7 @@ data Modifier m where
   Out :: Modifier Out
   -- | The operation both reads and writes to the array.
   Mut :: Modifier Mut
+deriving instance Show (Modifier m)
 
 -- Empty data types, which are only used for the types of 'Arg'.
 data Var' e   where
