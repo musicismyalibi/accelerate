@@ -93,7 +93,7 @@ instance IsSchedule UniformScheduleFun where
 
   -- convertScheduleFun afun
   --   | (partial, _) <- partialScheduleFun afun
-  --   = traceShow afun $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
+  --   = {-traceShow afun $-} stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv $ simplifyFun emptySimplifyEnv
   --   $ stronglyLiveVariablesFun $ simplifyFun emptySimplifyEnv
   --   $ fromPartialFun PEnd (ReusedVars IdxSet.empty) partial
 
@@ -155,103 +155,6 @@ instance IsSchedule UniformScheduleFun where
             putMVar mvar ()
           return (Signal mvar, Ref ref)
 
-convertScheduleFun' :: IsKernel kernel => C.PartitionedAfun (KernelOperation kernel) env t -> UniformScheduleFun kernel env (Scheduled UniformScheduleFun t)
-convertScheduleFun' = \case
-  C.Abody a
-    | grounds <- groundsR a
-    , Refl <- (reprIsBody @UniformScheduleFun grounds)
-    , DeclareVars lhs sub value <- declareVars $ outputR grounds
-    -> Slam lhs $ Sbody $ convertScheduleAcc (value weakenId) (weaken sub a)
-  --C.Alam lhs f -> Slam (convertLHSInput lhs) (convertScheduleFun' f)
-  C.Alam lhs f 
-    | DeclareInput sub lhs' _ <- declareInput PEnd lhs
-    -> undefined --Slam lhs' (convertScheduleFun' f)
-
-convertScheduleAcc :: IsKernel kernel => BaseVars env (Output t) -> C.PreOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env
-convertScheduleAcc _ (C.Exec op args) = undefined
-convertScheduleAcc value (C.Return vs) = writeReturn value vs Return
-convertScheduleAcc _ (C.Compute e) = undefined
-convertScheduleAcc value (C.Alet lhs u a1 a2) = convertLet value (C.Alet lhs u a1 a2)
-convertScheduleAcc _ (C.Alloc sh e n) = undefined
-convertScheduleAcc _ (C.Use e n b) =  undefined
-convertScheduleAcc _ (C.Unit e) =  undefined
-convertScheduleAcc value (C.Acond e a1 a2) = Acond e (convertScheduleAcc value a1) (convertScheduleAcc value a2) Return
-convertScheduleAcc _ (C.Awhile u a1 a2 a3) = undefined
-
-
-convertLet :: IsKernel kernel => BaseVars env (Output t) -> C.PreOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env
-convertLet value (C.Alet lhs u (C.Exec op args) a) | Exists env <- convertEnvFromList $ map (foldr1 combineMod') $ groupBy (\(Exists v1) (Exists v2) -> isJust $ matchIdx (varIdx v1) (varIdx v2)) $ argsVars args -- TODO: Remove duplicates more efficiently
-                                                  , Reads reEnv k inputBindings <- readRefs $ convertEnvRefs env
-                                                  , Just args' <- reindexArgs (reEnvIdx' reEnv) args
-                                                  , Just Refl <- leftHandSideIsVoid lhs
-                                                  , CompiledKernel kern sargs <- compileKernel' op args
-                                                  , DefineOutput doOutput _ varsOut <- defineOutput (groundsR (C.Exec op args)) u
-                                                    = Effect (Exec (kernelMetadata kern) kern sargs) (convertScheduleAcc value a) --(writeReturn value vs Return)--(writeReturn (weakenVars (weakenWithLHS lhs) value) vs Return) --(convertScheduleAcc value (C.Return vs)) --(Effect (RefWrite undefined undefined) Return) --(Alet LeftHandSideUnit undefined (convertScheduleAcc a2))
-                                                  where
-                                                    combineMod' :: Exists (Var AccessGroundR env) -> Exists (Var AccessGroundR env) -> Exists (Var AccessGroundR env)
-                                                    combineMod' (Exists (Var (AccessGroundRbuffer m1 tp) ix)) var@(Exists (Var (AccessGroundRbuffer m2 _) _))
-                                                      | Exists' m <- combineMod m1 m2 = Exists $ Var (AccessGroundRbuffer m tp) ix
-                                                      | otherwise = var
-                                                    combineMod' a _ = a -- Nothing has to be done when combining two scalars; they don't have access modifiers
-
--- convertLet value (C.Alet lhs u (C.Awhile u1 (C.Alam lhs1 (C.Abody a1)) (C.Alam lhs2 (C.Abody a2)) vs) a) = let (io, vs', creates) = getIO vs
---                                                                --creates = getCreates vs vs'
---                                                             in
---                                                             creates $ Awhile io (f vs) vs' $ Alet (mapLeftHandSide BaseRground lhs) undefined (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a)
---                                                           where
---                                                             getIO :: GroundVars env a -> (InputOutputR (Input a) (Output a), BaseVars env (Input a), UniformSchedule kernel env -> UniformSchedule kernel env)
---                                                             getIO TupRunit = (InputOutputRunit, TupRunit, id)
---                                                             getIO (TupRsingle (Var v _)) | Refl <- inputSingle v
---                                                                                          , io' <-  InputOutputRpair InputOutputRsignal InputOutputRref
---                                                                                          , (sig, sigres) <- (BaseRsignal, BaseRsignalResolver)
---                                                                                          , (ref, oRef) <- (BaseRref v, BaseRrefWrite v)
---                                                                                          --, DeclareVars lhs sub vars <- declareVars (TupRpair (TupRsingle sig) (TupRsingle ref))
---                                                                                          --, vars <- TupRsingle sig `TupRpair` TupRsingle ref
---                                                                                          --, vars <- TupRsingle (Var sig $ SuccIdx $ SuccIdx ZeroIdx) `TupRpair` TupRsingle (Var ref ZeroIdx)
---                                                                                          , binds <- Alet (LeftHandSideWildcard (TupRpair (TupRsingle ref) (TupRsingle oRef))) (NewRef v) . Alet (LeftHandSideWildcard (TupRpair (TupRsingle sig) (TupRsingle sigres))) NewSignal
---                                                                                            = (io', undefined, binds)
---                                                             getIO (TupRpair vs1 vs2) = let (io1, vs1', l1) = getIO vs1
---                                                                                            (io2, vs2', l2) = getIO vs2
---                                                                                        in
---                                                                                          (InputOutputRpair io1 io2, TupRpair vs1' vs2', l1 . l2)
-
---                                                             f :: GroundVars env a -> UniformScheduleFun kernel env (Input a -> Output PrimBool -> Output a -> ())
---                                                             f _ = Slam _
---                                                                 $ Slam (LeftHandSideSingle BaseRsignalResolver `LeftHandSidePair` LeftHandSideSingle (BaseRrefWrite $ GroundRscalar scalarType))
---                                                                 $ Slam _
---                                                                 $ Sbody
---                                                                 $ serial [
---                                                                   convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs1)) value) a1
---                                                                 , Alet (LeftHandSideSingle $ BaseRground $ GroundRscalar scalarType) (RefRead $ Var (BaseRref $ GroundRscalar scalarType) $ SuccIdx ZeroIdx)
---                                                                 $ Acond (Var scalarType ZeroIdx) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs2)) value) a2) Return Return
---                                                                 ]
-                                                            
-                                                            --getCreates :: GroundVars env a -> BasesR (Input a) -> UniformSchedule kernel env -> UniformSchedule kernel env
-                                                            --getCreates _ TupRunit = _
-
-convertLet value (C.Alet lhs u a1 a2) = Alet (mapLeftHandSide BaseRground lhs) (convertBinding u a1) (convertScheduleAcc (mapTupR (weaken (weakenWithLHS lhs)) value) a2)
-
-writeReturn :: IsKernel kernel => BaseVars env (Output t) -> GroundVars env t -> (UniformSchedule kernel env -> UniformSchedule kernel env)
-writeReturn TupRunit TupRunit = id
-writeReturn (TupRpair (TupRsingle (Var _ sig)) (TupRsingle v1)) (TupRsingle v2@(Var repr _)) | Refl <- outputSingle repr = Effect (RefWrite v1 (mapVar BaseRground v2)) . Effect (SignalResolve [sig])
-writeReturn (TupRpair a1 b1) (TupRpair a2 b2) = writeReturn a1 a2 . writeReturn b1 b2
-
-convertLHSInput :: GLeftHandSide a env env' -> BLeftHandSide (Input a) env env'
-convertLHSInput (LeftHandSideWildcard vs) = LeftHandSideWildcard $ inputR vs
-convertLHSInput (LeftHandSidePair lhs1 lhs2) = LeftHandSidePair (convertLHSInput lhs1) (convertLHSInput lhs2)
---convertLHSInput (LeftHandSideSingle v) | Refl <- inputSingle v, Exists lhs' <- rebuildLHS $ LeftHandSidePair (LeftHandSideSingle BaseRsignal) (LeftHandSideSingle (BaseRref v)) = lhs'
-
-type family InputEnv env a where
-  InputEnv env () = env
-  InputEnv env (a, b) = ((env, Signal), Ref a)
-  InputEnv env a = ((env, Signal), Ref a)
-
-convertBinding :: Uniquenesses a -> C.PreOpenAcc (Cluster op) env t -> Binding env t
-convertBinding _ (C.Compute e) = Compute e
-convertBinding _ (C.Alloc sh e n) = Alloc sh e n
-convertBinding _ (C.Use e n b) = Use e n b
-convertBinding _ (C.Unit e) = Unit e
-convertBinding _ x = traceShow x undefined
 
 
 data Forked = Forked | Seq | Comb Int
@@ -337,32 +240,6 @@ data UsageOpenAfun op env t where
   UsageAbody ::                             UsageOpenAcc  op env  t -> UsageOpenAfun op env t
   UsageAlam  :: GLeftHandSide a env env' -> UsageOpenAfun op env' t -> UsageOpenAfun op env (a -> t)
 
-
--- instance Sink (UsageOpenAcc op) where
---   {-# INLINEABLE weaken #-}
---   --weaken k = undefined --Stats.substitution "weaken" . rebuildA (rebuildWeakenVar k)
---   weaken k (UsageExec s op as)             = UsageExec s op (weaken' k as)
---   weaken k (UsageReturn vars)      = undefined
---   weaken k (UsageCompute _ e)      = undefined
---   weaken k (UsageAlet _ _ _ _ _ _ a)   = undefined
---   weaken k (UsageAlloc _ tp _)     = undefined
---   weaken k (UsageUse tp _ _)       = undefined
---   weaken k (UsageUnit (Var tp _))  = undefined
---   weaken k (UsageAcond _ _ a _)    = undefined
---   weaken k (UsageAwhile _ _ _ _ a) = undefined
-
--- instance Sink (UsageOpenAfun op) where
---   {-# INLINEABLE weaken #-}
---   weaken k = undefined --Stats.substitution "weaken" . rebuildA (rebuildWeakenVar k)
-
--- instance Sink' SyncEnv where
---   weaken' k s = go (k ZeroIdx) s
---     where
---       go :: Idx env t -> SyncEnv env' -> SyncEnv env 
---       go ZeroIdx s = s
---       go (SuccIdx i) s = partialEnvSkip (go i s)
-
-
 instance HasGroundsR (UsageOpenAcc op env) where
   groundsR UsageExec{}             = TupRunit
   groundsR (UsageReturn vars)      = groundsR vars
@@ -375,56 +252,55 @@ instance HasGroundsR (UsageOpenAcc op env) where
   groundsR (UsageAwhile _ _ _ _ a) = groundsR a
 
 usageAnalysisOpenAcc :: C.PreOpenAcc op env t -> UsageOpenAcc op env t
-usageAnalysisOpenAcc = (\(_,m,x) -> traceShow (keys m) x) . go 1
+usageAnalysisOpenAcc = (\(_,m,x) -> x) . go 1
   where
     go :: Int -> C.PreOpenAcc op env t -> (Int, Map Int [Exists (GroundVar env)], UsageOpenAcc op env t)
     go i (C.Exec op args)      = (i, singleton 0 (map accesToGround (argsVars args)), UsageExec (syncEnvFromList (argsVars args)) op args)
-    go i (C.Return vs)         = (i, singleton 0 [], UsageReturn vs)
-    go i (C.Compute e)         = (i, singleton 0 (expGroundVars e), UsageCompute (syncEnvReadFromList (expGroundVars e)) e)
+    go i (C.Return vs)         = (i, singleton 0 [],                                  UsageReturn vs)
+    go i (C.Compute e)         = (i, singleton 0 (expGroundVars e),                   UsageCompute (syncEnvReadFromList (expGroundVars e)) e)
     go i (C.Alet lhs u a1 a2)  = let (i1, v1, a1') = go i a1
                                      (i2, v2, a2') = go i1 a2
-                                     used = unionPartialEnv max (syncEnvUsage a1') (weakenSyncEnv lhs (syncEnvUsage a2'))
-                                     s1 = getLhsVars lhs ++ getWriteVars (partialEnvSkipLHS lhs (syncEnvUsage a1'))
-                                     --(directs, v2') = M.partition (\x -> sort s1 `isSubsequenceOf` sort x) $ M.delete 0 v2
-                                     waits = directlyWaits' a2'
+                                     used          = unionPartialEnv max (syncEnvUsage a1') (weakenSyncEnv lhs (syncEnvUsage a2'))
+                                     s1            = getLhsVars lhs ++ getWriteVars (partialEnvSkipLHS lhs (syncEnvUsage a1'))
+                                     waits         = directlyWaits' a2'
                                  in case (sort s1 `isSubsequenceOf` sort waits, isTrivial a1', isForked a2') of
-                                    (False, False, _) -> (i2 + 1, insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2), UsageAlet used i2 Forked lhs u a1' a2')
-                                    (True, False, True) -> (i2 + 1, insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2), UsageAlet used i2 (Comb undefined) lhs u a1' a2')
-                                    _ -> (i2 + 1, insert 0 (v1 M.! 0) $ insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2), UsageAlet used i2 Seq lhs u a1' a2')
-    go i (C.Alloc sh e n)      = (i, singleton 0 (flattenTupR $ toGrounds n), UsageAlloc sh e n)
-    go i (C.Use e n b)         = (i, singleton 0 [], UsageUse e n b)
-    go i (C.Unit e)            = (i, singleton 0 [Exists (toGround e)], UsageUnit e)
+                                    (_,    True,  _)    -> (i2 + 1, insert 0 (v1 M.! 0) $ insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2), UsageAlet used i2 Seq lhs u a1' a2')
+                                    (True, False, True) -> (i2 + 1, insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2),                       UsageAlet used i2 (Comb undefined) lhs u a1' a2')
+                                    _                   -> (i2 + 1, insert i2 (v1 M.! 0) (strengthenVarsMapWithLHS lhs v2),                       UsageAlet used i2 Forked lhs u a1' a2')
+    go i (C.Alloc sh e n)      = (i, singleton 0 (flattenTupR $ toGrounds n),         UsageAlloc sh e n)
+    go i (C.Use e n b)         = (i, singleton 0 [],                                  UsageUse e n b)
+    go i (C.Unit e)            = (i, singleton 0 [Exists (toGround e)],               UsageUnit e)
     go i (C.Acond e a1 a2)     = let (i1, v1, a1') = go i a1
                                      (i2, v2, a2') = go i1 a2
-                                     used = unionPartialEnv max (syncEnvUsage a1') (syncEnvUsage a2')
+                                     used          = unionPartialEnv max (syncEnvUsage a1') (syncEnvUsage a2')
                                  in (i2, insert 0 (Exists (toGround e) : intersect' (v1 M.! 0) (v2 M.! 0)) (M.union v1 v2), UsageAcond used e a1' a2')
-    go i (C.Awhile u a1 a2 vs) = let a1' = usageAnalysisOpenAFun a1
-                                     a2' = usageAnalysisOpenAFun a2
+    go i (C.Awhile u a1 a2 vs) = let a1'  = usageAnalysisOpenAFun a1
+                                     a2'  = usageAnalysisOpenAFun a2
                                      used = unionPartialEnv max (syncEnvFunUsage a1') $ unionPartialEnv max (syncEnvFunUsage a2') $ variablesToSyncEnv u vs
                                  in (i, singleton 0 [], UsageAwhile used u a1' a2' vs)
 
 usageAnalysisOpenAFun :: C.PreOpenAfun op env t -> UsageOpenAfun op env t
-usageAnalysisOpenAFun (C.Abody a) = UsageAbody (usageAnalysisOpenAcc a)
+usageAnalysisOpenAFun (C.Abody a)    = UsageAbody (usageAnalysisOpenAcc a)
 usageAnalysisOpenAFun (C.Alam lhs f) = UsageAlam lhs (usageAnalysisOpenAFun f)
 
 isForked :: UsageOpenAcc op env t -> Bool
-isForked (UsageAlet _ _ Forked _ _ _ _) = True
+isForked (UsageAlet _ _ Forked _ _ _ _)   = True
 isForked (UsageAlet _ _ (Comb _) _ _ _ _) = True
-isForked _ = False
+isForked _                                = False
 
 strengthenVarsMapWithLHS :: GLeftHandSide t env env' -> Map Int [Exists (GroundVar env')] -> Map Int [Exists (GroundVar env)]
 strengthenVarsMapWithLHS lhs = M.map (mapMaybe (\(Exists (Var tp x)) -> Exists . Var tp <$> strengthenWithLHS lhs x))
 
 syncEnvUsage :: UsageOpenAcc op env t -> SyncEnv env
-syncEnvUsage (UsageExec s op args) = s
-syncEnvUsage (UsageReturn vs) = variablesToReadSyncEnv vs
-syncEnvUsage (UsageCompute s e) = s
+syncEnvUsage (UsageExec s op args)     = s
+syncEnvUsage (UsageReturn vs)          = variablesToReadSyncEnv vs
+syncEnvUsage (UsageCompute s e)        = s
 syncEnvUsage (UsageAlet s _ _ _ _ _ _) = s
-syncEnvUsage (UsageAlloc sh e n) = PEnd
-syncEnvUsage (UsageUse e n b) = PEnd
-syncEnvUsage (UsageUnit e) = PEnd
-syncEnvUsage (UsageAcond s _ _ _) = s
-syncEnvUsage (UsageAwhile s _ _ _ _) = s
+syncEnvUsage (UsageAlloc sh e n)       = PEnd
+syncEnvUsage (UsageUse e n b)          = PEnd
+syncEnvUsage (UsageUnit e)             = PEnd
+syncEnvUsage (UsageAcond s _ _ _)      = s
+syncEnvUsage (UsageAwhile s _ _ _ _)   = s
 
 syncEnvFunUsage :: UsageOpenAfun op env t -> SyncEnv env
 syncEnvFunUsage (UsageAlam lhs f) = weakenSyncEnv lhs $ syncEnvFunUsage f
@@ -435,7 +311,7 @@ variablesToReadSyncEnv vars = partialEnvFromList combine $ go vars []
   where
     go :: GroundVars genv t -> [EnvBinding Sync genv] -> [EnvBinding Sync genv]
     go (TupRsingle (Var (GroundRbuffer _) ix))
-                          accum = EnvBinding ix SyncRead : accum
+                        accum = EnvBinding ix SyncRead : accum
     go (TupRpair v1 v2) accum = go v1 $ go v2 accum
     go _                accum = accum
 
@@ -489,175 +365,109 @@ data OutputVar fenv t where
 type OutputVars fenv = TupR (OutputVar fenv)
 
 instance Sink OutputVar where
-  weaken k (OutputScalar tp ref s) = OutputScalar tp (weaken k ref) (weaken k s)
-  weaken k (OutputBuffer tp ref s1 s2) = OutputBuffer tp (weaken k ref) (weaken k s1) (weaken k s2)
+  weaken k (OutputScalar tp ref s)       = OutputScalar tp (weaken k ref) (weaken k s)
+  weaken k (OutputBuffer tp ref s1 s2)   = OutputBuffer tp (weaken k ref) (weaken k s1) (weaken k s2)
   weaken k (OutputSingleBuffer tp ref s) = OutputSingleBuffer tp (weaken k ref) (weaken k s)
-  weaken k OutputEmpty = OutputEmpty
+  weaken k OutputEmpty                   = OutputEmpty
 
 getOutputRef :: OutputVar fenv t -> Idx fenv (OutputRef t)
-getOutputRef (OutputScalar _ ref _) = ref
-getOutputRef (OutputBuffer _ ref _ _) = ref
+getOutputRef (OutputScalar _ ref _)       = ref
+getOutputRef (OutputBuffer _ ref _ _)     = ref
 getOutputRef (OutputSingleBuffer _ ref _) = ref
 
 getOutputSignals :: OutputVar fenv t -> [Idx fenv SignalResolver]
-getOutputSignals (OutputScalar _ _ s) = [s]
-getOutputSignals (OutputBuffer _ _ s1 s2) = [s1, s2]
+getOutputSignals (OutputScalar _ _ s)       = [s]
+getOutputSignals (OutputBuffer _ _ s1 s2)   = [s1, s2]
 getOutputSignals (OutputSingleBuffer _ _ s) = [s]
 
 data CombineAcc kernel env'' where
-  -- CombineAcc :: Int
-  --            -> (forall f . PartialEnv f env'' -> PartialEnv f env)--env :> env''
-  --            -> GLeftHandSide t env env'
-  --            -> Uniquenesses t
-  --            -> UsageOpenAcc kernel env t
-  --            -> CombineAcc kernel env''
 
   CombineAcc :: Int
-             -> (forall f . PartialEnv f env -> PartialEnv f env'')--env :> env''
+             -> (forall f . PartialEnv f env -> PartialEnv f env'')
              -> SyncEnv env
-             -- -> fenv :> fenv'
-             -- -> (UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
              -> GLeftHandSide t env'' env'
              -> Uniquenesses t
              -> (forall fenv . OutputVars fenv t -> FutureEnv' fenv env'' -> UniformSchedule kernel fenv)
              -> CombineAcc kernel env
 
--- data CombineAcc' kernel fenv  where
---   CombineAcc' :: fenv :> fenv'
---               -> UniformSchedule kernel fenv'
---               -> FutureEnv' fenv' env
---               -> (UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
---               -> CombineAcc' kernel fenv
-
 weakenCombineAcc :: GLeftHandSide t env env' -> CombineAcc kernel env -> CombineAcc kernel env'
 weakenCombineAcc lhs' (CombineAcc i k s lhs u a) = CombineAcc i (k . flip environmentDropLHS lhs') (partialEnvSkipLHS lhs' s) lhs u a
--- weakenCombineAcc k1 (CombineAcc i s k bnd env instr) = CombineAcc i s (k .> k1) bnd env instr
 
 updateCombinAccId :: Int -> Int -> CombineAcc kernel env -> CombineAcc kernel env
 updateCombinAccId i i' (CombineAcc i1 k s lhs u a) = CombineAcc (if i1 == i then i' else i1) k s lhs u a
--- updateCombinAccId i i' (CombineAcc i1 k s f) = CombineAcc (if i1 == i then i' else i1) k s f
 
-fromUsage :: forall kernel env' t env. IsKernel kernel => OutputVars env' t -> FutureEnv' env' env -> [CombineAcc kernel env] -> UsageOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env'
-fromUsage outputVars env [] (UsageExec _ op args) | Reads' reEnv k waits resolves reads <- readVars (partialEnvFromVarsList (map accesToGround (argsVars args))) env
-                                             --, writeResolves <- mapMaybe (getWriteResolve env) (argsVars args)
-                                             , Just args' <- reindexArgs (reEnvIdx' reEnv) args
-                                             , CompiledKernel kern sargs <- compileKernel' op args'
-                                               = useSignals SignalAwait waits
-                                               $ reads
-                                               $ Effect (Exec (kernelMetadata kern) kern sargs)
-                                               $ useSignals SignalResolve (map (weaken k) (resolves))
-                                               Return
-fromUsage outputVars env [] (UsageReturn vs) = getOutput outputVars vs env
-fromUsage outputVars env waits (UsageAlet s i Forked lhs u a1 a2) | --s1 <- getLhsVars lhs ++ getWriteVars (partialEnvSkipLHS lhs (syncEnvUsage a1))
-                                                   --, waits <- directlyWaits' a2
-                                                   --, False <- sort s1 `isSubsequenceOf` sort waits
-                                                   --, False <- isTrivial a1
-                                                     --waits' <- CombineAcc i id (syncEnvUsage a1) lhs u (\outputBnd fenv -> fromUsage outputBnd fenv [] a1) : filter (\(CombineAcc i' _ _ _ _ _) -> i' == i) waits
-                                                   --, s' <- foldl getSyncEnv PEnd waits'                                                   
-                                                     ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
-                                                   --, envBody' <- declareCombLet i envBnd lhs u
-                                                   --, bnd <- \fenv -> fromUsage outputBnd (mapPartialEnv (weaken (k2)) fenv) [] a1
-                                                   --, UpdateFutureEnv k envBnd' instr <- updateFutureEnv i envBnd
-                                                   --, AddCombines s' k0 _ t _ _ <- foldr (addCombine @kernel @_) (AddCombines PEnd weakenId weakenId Return envBnd' id) waits'                                                   
-                                                   --, AddCombine t k0 k0' envBnd' envBody' instr <- f envBnd envBody
-                                                   , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
-                                                   , envBody' <- fEnv envBody
-                                                   , bnd <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) waits a1
-                                                   , body <- fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' (map (weakenCombineAcc lhs) waits) a2
-                                                   = splitInstr $ instr $ Fork bnd body
-fromUsage outputVars env waits (UsageAlet s i Seq lhs u a1 a2) | Just Refl <- leftHandSideIsVoid lhs
-                                                   --, ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
-                                                   , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
-                                                   , envBody <- fEnv env
-                                                   , bnd <- fromUsageSubLet outputBnd (mapPartialEnv (weaken k2) env) waits a1--fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
-                                                   , body <- fromUsageSubLet (mapTupR (weaken k2) outputVars) envBody waits a2--fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a2
-                                                   = instr $ serial [bnd, body]
-fromUsage outputVars env waits (UsageAlet s i Seq lhs u a1 a2) | --ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
-                                                     FromUsageBinding used grnds f <- fromUsageBinding a1
-                                                   , Reads' reEnv k2 waitSignals resolves reads <- readVars (partialEnvFromVarsList used) env
-                                                   , AddVars k3 envBody lhs' <- addVars lhs (mapPartialEnv (weaken k2) env) u
-                                                   , Just bnd <- f (reEnvIdx' reEnv)
-                                                   , body <- fromUsageSubLet (mapTupR (weaken (k3 .> k2)) outputVars) envBody (map (weakenCombineAcc lhs) waits) a2--sub' envBody (syncEnvUsage a2) (\fenv -> fromUsage (mapTupR (weaken (k3 .> k2)) outputVars) fenv a2) --fromUsage (mapTupR (weaken (k3 .> k2 .> k1)) outputVars) envBody' a2
-                                                   = useSignals SignalAwait waitSignals
-                                                   $ reads
-                                                   $ Alet lhs' bnd
-                                                   $ useSignals SignalResolve (map (weaken (k3 .> k2)) resolves)
-                                                   body
-fromUsage outputVars env waits (UsageAlet s i (Comb i') lhs u a1 a2) | --s1 <- getLhsVars lhs ++ getWriteVars (partialEnvSkipLHS lhs (syncEnvUsage a1))
-                                                        --, s2 <- getForkedVars a2
-                                                        --, _:_ <- s1 `intersect'` s2
-                                                          ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
-                                                        , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
-                                                        , envBody' <- fEnv envBody
-                                                        , bnd <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) waits a1--fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
-                                                        , body <- fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' (map (weakenCombineAcc lhs) waits) a2--fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a2
-                                                        = splitInstr $ instr $ combineFork bnd body
---fromUsage outputVars env waits (UsageAlet s i (Comb i') lhs (u :: Uniquenesses bnd) a1 a2) -- = fromUsage outputVars (partialEnvSkipLHS lhs env) (CombineAcc i' (environmentDropLHS lhs) lhs u a1 : map (updateCombinAccId i i' . weakenCombineAcc (weakenWithLHS lhs)) waits) a2
-                                                                    --  = fromUsage outputVars env (CombineAcc i' (syncEnvUsage a1) f : map (updateCombinAccId i i') waits) a2
-                                                                    --  where
-                                                                    --   f :: forall fenv . FutureEnv' fenv env -> CombineAcc' kernel fenv
-                                                                    --   f fenv | DeclareLet k2 instr outputBnd envBody _ <- declareLet fenv lhs' u
-                                                                    --          , bnd <- fromUsage outputBnd (mapPartialEnv (weaken (k2)) envBody) [] (weaken (k) a1)
-                                                                    --          = CombineAcc' k2 bnd envBody instr
-                                                                     -- | envBody <- declareCombLet i' env lhs u
-                                                                     --, bnd <- (\outputBnd fenv -> fromUsage outputBnd fenv [] a1) :: (forall fenv . OutputVars fenv bnd -> FutureEnv' fenv env -> UniformSchedule kernel fenv)
-                                                                     -- = fromUsage outputVars envBody (CombineAcc i' (`environmentDropLHS` lhs) (partialEnvSkipLHS lhs (syncEnvUsage a1)) lhs u (\outputBnd fenv -> fromUsage outputBnd fenv [] a1) : map (updateCombinAccId i i' . weakenCombineAcc lhs) waits) a2
--- fromUsage outputVars env waits (UsageAlet s i (Comb i') lhs u a1 a2) | ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
---                                                    , FromUsageBinding used grnds f <- fromUsageBinding a1
---                                                    , Reads' reEnv k2 waits' resolves reads <- readVars (partialEnvFromVarsList used) envBnd
---                                                    --, AddVars k3 envBody lhs' <- addVars lhs (mapPartialEnv (weaken k2) env) u
---                                                    , Just bnd <- f (reEnvIdx' reEnv)
---                                                    , body <- fromUsageSubLet (mapTupR (weaken (k3 .> k2)) outputVars) envBody (map (weakenCombineAcc lhs) waits) a2--sub' envBody (syncEnvUsage a2) (\fenv -> fromUsage (mapTupR (weaken (k3 .> k2)) outputVars) fenv a2) --fromUsage (mapTupR (weaken (k3 .> k2 .> k1)) outputVars) envBody' a2
---                                                    = combineFork
---                                                    ( useSignals SignalAwait waits'
---                                                    $ reads
---                                                    $ Alet lhs' bnd
---                                                    $ useSignals SignalResolve (map (weaken (k3 .> k2)) resolves) Return)
---                                                    body
--- fromUsage outputVars env (UsageAlet s Comb lhs u bnd (UsageAlet s1 Forked lhs1 u1 bnd1 a)) | ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (unionPartialEnv max (syncEnvUsage bnd) (environmentDropLHS (syncEnvUsage bnd1) lhs)) (environmentDropLHS (environmentDropLHS (syncEnvUsage a) lhs1) lhs)
---                                                                                            , DeclareLet k2 instr outputBnd envBody' _ <- declareLet envBody (LeftHandSidePair lhs lhs1) (TupRpair u u1)
---                                                                                            , bnd' <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) bnd--fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
---                                                                                            , bnd1' <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) bnd1
---                                                                                            , body <- fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a--fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a2
---                                                                                            = splitInstr $ instr $ Fork (serial [bnd', bnd1']) body
-fromUsage outputVars env [] c@UsageCompute{} = let FromUsageBinding used grnds f = fromUsageBinding c
-                                            in fromUsageBinding' outputVars used grnds f env
-fromUsage outputVars env [] a@UsageAlloc{}   = let FromUsageBinding used grnds f = fromUsageBinding a
-                                            in fromUsageBinding' outputVars used grnds f env
-fromUsage outputVars env [] u@UsageUse{}     = let FromUsageBinding used grnds f = fromUsageBinding u
-                                            in fromUsageBinding' outputVars used grnds f env
-fromUsage outputVars env [] u@UsageUnit{}    = let FromUsageBinding used grnds f = fromUsageBinding u
-                                            in fromUsageBinding' outputVars used grnds f env
-fromUsage outputVars env waits (UsageAcond s (Var _ ix) a1 a2) = case prjPartial ix env of
-                                                            (Just (FutureScalar' tp (RefVar r) s)) -> useSignals SignalAwait (mcons s [])
-                                                                                          $ Alet (LeftHandSideSingle $ BaseRground $ GroundRscalar tp) (RefRead (Var (BaseRref $ GroundRscalar tp) r))
-                                                                                          $ Acond (Var tp ZeroIdx)
-                                                                                            (sub' env' (syncEnvUsage a1) (\fenv -> fromUsage outputVars' fenv waits a1))
-                                                                                            (sub' env' (syncEnvUsage a2) (\fenv -> fromUsage outputVars' fenv waits a2))
-                                                                                            Return
-                                                                                          where
-                                                                                            env' = mapPartialEnv (weaken (weakenSucc weakenId)) env
-                                                                                            outputVars' = mapTupR (weaken (weakenSucc weakenId)) outputVars
-                                                            (Just (FutureScalar' tp (BndVar ix) _)) -> Acond (Var tp ix)
-                                                                                            (sub' env (syncEnvUsage a1) (\fenv -> fromUsage outputVars fenv waits a1))
-                                                                                            (sub' env (syncEnvUsage a2) (\fenv -> fromUsage outputVars fenv waits a2))
-                                                                                            Return
-fromUsage outputVars env [] while@UsageAwhile{} = fromUsageWhile outputVars env while
+fromUsage :: forall kernel env' t env. IsKernel kernel => OutputVars env' t -> FutureEnv' env' env -> UsageOpenAcc (Cluster (KernelOperation kernel)) env t -> UniformSchedule kernel env'
+fromUsage outputVars env (UsageExec _ op args)                  | Reads' reEnv k waits resolves reads <- readVars (partialEnvFromVarsList (map accesToGround (argsVars args))) env
+                                                                , Just args' <- reindexArgs (reEnvIdx' reEnv) args
+                                                                , CompiledKernel kern sargs <- compileKernel' op args'
+                                                                = useSignals SignalAwait waits
+                                                                $ reads
+                                                                $ Effect (Exec (kernelMetadata kern) kern sargs)
+                                                                $ useSignals SignalResolve (map (weaken k) resolves)
+                                                                  Return
+fromUsage outputVars env (UsageReturn vs)                       = getOutput outputVars vs env
+fromUsage outputVars env (UsageAlet s i Forked lhs u a1 a2)     | ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
+                                                                , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
+                                                                , envBody' <- fEnv envBody
+                                                                , bnd <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
+                                                                , body <- fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a2
+                                                                = splitInstr $ instr $ Fork bnd body
+fromUsage outputVars env (UsageAlet s i Seq lhs u a1 a2)        | True <- isBinding a1
+                                                                , FromUsageBinding used grnds f <- fromUsageBinding a1
+                                                                , Reads' reEnv k2 waitSignals resolves reads <- readVars (partialEnvFromVarsList used) env
+                                                                , AddVars k3 envBody lhs' <- addVars lhs (mapPartialEnv (weaken k2) env) u
+                                                                , Just bnd <- f (reEnvIdx' reEnv)
+                                                                , body <- fromUsageSubLet (mapTupR (weaken (k3 .> k2)) outputVars) envBody a2
+                                                                = useSignals SignalAwait waitSignals
+                                                                $ reads
+                                                                $ Alet lhs' bnd
+                                                                $ useSignals SignalResolve (map (weaken (k3 .> k2)) resolves)
+                                                                body
+fromUsage outputVars env (UsageAlet s i Seq lhs u a1 a2)        | DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
+                                                                , envBody <- fEnv env
+                                                                , bnd <- fromUsageSubLet outputBnd (mapPartialEnv (weaken k2) env) a1
+                                                                , body <- fromUsageSubLet (mapTupR (weaken k2) outputVars) envBody a2
+                                                                = instr $ serial [bnd, body]
+fromUsage outputVars env (UsageAlet s i (Comb i') lhs u a1 a2)  | ChainFutureEnv' splitInstr k1 envBnd envBody <- chainFutureEnvironment' weakenId env (syncEnvUsage a1) (environmentDropLHS (syncEnvUsage a2) lhs)
+                                                                , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u
+                                                                , envBody' <- fEnv envBody
+                                                                , bnd <- fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
+                                                                , body <- fromUsage (mapTupR (weaken (k2 .> k1)) outputVars) envBody' a2
+                                                                = splitInstr $ instr $ combineFork bnd body
+fromUsage outputVars env c@UsageCompute{}                       = let FromUsageBinding used grnds f = fromUsageBinding c
+                                                                  in fromUsageBinding' outputVars used grnds f env
+fromUsage outputVars env a@UsageAlloc{}                         = let FromUsageBinding used grnds f = fromUsageBinding a
+                                                                  in fromUsageBinding' outputVars used grnds f env
+fromUsage outputVars env u@UsageUse{}                           = let FromUsageBinding used grnds f = fromUsageBinding u
+                                                                  in fromUsageBinding' outputVars used grnds f env
+fromUsage outputVars env u@UsageUnit{}                          = let FromUsageBinding used grnds f = fromUsageBinding u
+                                                                  in fromUsageBinding' outputVars used grnds f env
+fromUsage outputVars env (UsageAcond s (Var _ ix) a1 a2)        = case prjPartial ix env of
+                                                                    (Just (FutureScalar' tp (RefVar r) s))  -> useSignals SignalAwait (mcons s [])
+                                                                                                             $ Alet (LeftHandSideSingle $ BaseRground $ GroundRscalar tp) (RefRead (Var (BaseRref $ GroundRscalar tp) r))
+                                                                                                             $ Acond (Var tp ZeroIdx)
+                                                                                                               (sub' env' (syncEnvUsage a1) (\fenv -> fromUsage outputVars' fenv a1))
+                                                                                                               (sub' env' (syncEnvUsage a2) (\fenv -> fromUsage outputVars' fenv a2))
+                                                                                                               Return
+                                                                                                            where
+                                                                                                              env' = mapPartialEnv (weaken (weakenSucc weakenId)) env
+                                                                                                              outputVars' = mapTupR (weaken (weakenSucc weakenId)) outputVars
+                                                                    (Just (FutureScalar' tp (BndVar ix) _)) -> Acond (Var tp ix)
+                                                                                                               (sub' env (syncEnvUsage a1) (\fenv -> fromUsage outputVars fenv a1))
+                                                                                                               (sub' env (syncEnvUsage a2) (\fenv -> fromUsage outputVars fenv a2))
+                                                                                                               Return
+fromUsage outputVars env while@UsageAwhile{}                    = fromUsageWhile outputVars env while
 
 fromUsageFun :: IsKernel kernel => FutureEnv' env' env -> UsageOpenAfun (Cluster (KernelOperation kernel)) env t -> UniformScheduleFun kernel env' (Scheduled UniformScheduleFun t)
 fromUsageFun env (UsageAbody body) | grounds <- groundsR body
                                    , Refl <- reprIsBody @UniformScheduleFun $ grounds
                                    , DeclareVars lhs k1 value <- declareVars $ outputR grounds
-                                   = Slam lhs $ Sbody $ fromUsage (getOutputVars grounds (value weakenId)) (mapPartialEnv (weaken k1) env) [] body
+                                   = Slam lhs $ Sbody $ fromUsage (getOutputVars grounds (value weakenId)) (mapPartialEnv (weaken k1) env) body
 fromUsageFun env (UsageAlam lhs f) | DeclareLam lhs' env' <- declareLam env lhs 
                                    = Slam lhs' (fromUsageFun env' f)
 
 combWeaken :: env :> env1 -> env :> env2 -> env1 :> env2
 combWeaken = undefined
-
--- updateFuture :: Int -> Future' fenv t -> Future' fenv t
--- updateFuture i' (FutureDelayed i f) | i == i' = f
--- updateFuture _ f = f
 
 data UpdateFutureEnv kernel fenv env where
   UpdateFutureEnv :: fenv :> fenv'
@@ -667,74 +477,15 @@ data UpdateFutureEnv kernel fenv env where
 
 updateFutureEnv :: Int -> FutureEnv' fenv env -> UpdateFutureEnv kernel fenv env
 updateFutureEnv i' (PPush env (FutureDelayed i _ f)) | i == i' 
-                                                   , UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env
-                                                   , FutureWeaken k future instr <- f env'
-                                                   = UpdateFutureEnv (k .> k') (PPush (mapPartialEnv (weaken k) env') future) (instr' . instr)
-updateFutureEnv i' (PPush env f) | UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env = UpdateFutureEnv k' (PPush env' (weaken k' f)) instr'
-updateFutureEnv i' (PNone env) | UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env = UpdateFutureEnv k' (PNone env') instr'
-updateFutureEnv _ PEnd = UpdateFutureEnv weakenId PEnd id
+                                                     , UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env
+                                                     , FutureWeaken k future instr <- f env'
+                                                     = UpdateFutureEnv (k .> k') (PPush (mapPartialEnv (weaken k) env') future) (instr' . instr)
+updateFutureEnv i' (PPush env f)                     | UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env = UpdateFutureEnv k' (PPush env' (weaken k' f)) instr'
+updateFutureEnv i' (PNone env)                       | UpdateFutureEnv k' env' instr' <- updateFutureEnv i' env = UpdateFutureEnv k' (PNone env') instr'
+updateFutureEnv _   PEnd                             = UpdateFutureEnv weakenId PEnd id
 
 getSyncEnv :: SyncEnv env -> CombineAcc kernel env -> SyncEnv env
---getSyncEnv (GetSyncEnv lhs' s) (CombineAcc _ _ s' lhs _ _) = GetSyncEnv (LeftHandSidePair lhs lhs') $ unionPartialEnv max s' (weakenSyncEnv lhs s)
 getSyncEnv s (CombineAcc _ _ s' lhs _ _) = unionPartialEnv max s' s
-
-data AddCombines kernel env fenv where
-  -- AddCombines :: env' :> env''
-  --             -> SyncEnv env
-  --             -> FutureEnv' env'' env
-  --             -> FutureEnv' fenv env
-  --             -> (UniformSchedule kernel env'' -> UniformSchedule kernel env')
-  --             -> UniformSchedule kernel fenv
-  --             -> AddCombines kernel fenv
-
-  -- AddCombines :: SyncEnv env'
-  --             -> (forall fenv . FutureEnv' fenv env -> FutureEnv' fenv env -> AddCombine kernel fenv env)
-  --             -> AddCombines kernel env
-
-  AddCombines :: SyncEnv env
-              -> fenv :> fenv'
-              -> env :> env'
-              -> UniformSchedule kernel fenv
-              -> FutureEnv' fenv env
-              -> (UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
-              -> AddCombines kernel env fenv
-
-data AddCombine kernel fenv env where
-  AddCombine :: UniformSchedule kernel fenv
-             -> fenv :> fenv'
-             -> (FutureEnv' fenv env -> FutureEnv' fenv' env)
-             -- -> FutureEnv' fenv' env
-             -- -> FutureEnv' fenv' env
-             -> (UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
-             -> AddCombine kernel fenv env'
-
---addCombine :: forall kernel env fenv. IsKernel kernel => CombineAcc kernel env -> AddCombines kernel env fenv -> AddCombines kernel env fenv
--- addCombine (CombineAcc i k lhs u a1) (AddCombines k' s env envBody decl a) | Exists lhs' <- rebuildLHS lhs
---                                                               , DeclareLet k2 instr outputBnd envBody _ <- declareLet env lhs' u
---                                                               , bnd <- fromUsage outputBnd fenv [] (weaken k a1) -- :: forall fenv' . FutureEnv' fenv' env -> UniformSchedule kernel fenv'--fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
---                                                               = AddCombines k2 (unionPartialEnv max (syncEnvUsage (weaken k a1)) (weakenSyncEnv lhs' s)) envBody (instr . decl) (\fenv -> serial [bnd fenv, a fenv])
--- addCombine (CombineAcc i k lhs u a1) (AddCombines s f) | Exists lhs' <- rebuildLHS lhs
---                                                               --, DeclareLet k2 instr outputBnd envBody _ <- declareLet env lhs' u
---                                                               --, bnd <- (\fenv -> fromUsage outputBnd fenv [] (weaken k a1)) :: forall fenv' . FutureEnv' fenv' env -> UniformSchedule kernel fenv'--fromUsage outputBnd (mapPartialEnv (weaken k2) envBnd) a1
---                                                               = AddCombines (unionPartialEnv max (syncEnvUsage a1) (k s)) f'
---                                                               where
---                                                                 -- bnd :: forall fenv t . OutputVars fenv t -> UsageOpenAcc (Cluster (KernelOperation kernel)) env t -> FutureEnv' fenv env -> UniformSchedule kernel fenv
---                                                                 -- bnd outputBnd a' fenv = fromUsage outputBnd fenv [] a'
---                                                                 f' :: forall fenv . FutureEnv' fenv env -> FutureEnv' fenv env -> AddCombine kernel fenv env
---                                                                 f' fenv fenv' | AddCombine a k' fEnv' decl <- f fenv fenv'
---                                                                            , envBnd <- fEnv' $ k fenv
---                                                                            , envBody <- fEnv' $ k fenv'
---                                                                            --, Exists lhs' <- rebuildLHS lhs
---                                                                            , DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u -- :: DeclareLet kernel fenv env t     
---                                                                            --, envBnd' <- fEnv envBnd
---                                                                            --, envBody' <- fEnv envBody
---                                                                            , bnd <- fromUsage outputBnd (mapPartialEnv (weaken (k2)) envBnd) [] a1
---                                                                            = AddCombine (serial [weaken' k2 a, bnd]) (k2 .> k') (fEnv . fEnv') (decl . instr)
--- addCombine (CombineAcc i1 k1 s lhs u f) (AddCombines s' k' k1' bnd' env' instr') | --CombineAcc' k bnd env instr <- f (k1' .> k1) env'
---                                                                              --DeclareLet k2 instr outputBnd fEnv _ <- declareLet lhs u -- :: DeclareLet kernel fenv env t
---                                                                              outputBnd <- declareCombLet' lhs u
---                                                                            , bnd <- f outputBnd (k1 env')
---                                                                            = AddCombines undefined{-(unionPartialEnv max s s')-} (k') (k1') (serial [bnd', bnd]) env' undefined --(instr' . instr)
 
 data WeakenedLeftHandSide s v env where
   WeakenedLeftHandSide :: LeftHandSide s v env env'
@@ -744,12 +495,12 @@ weakenLeftHandSide :: env :> env' -> LeftHandSide s v env env'' -> WeakenedLeftH
 weakenLeftHandSide k (LeftHandSideSingle l) = WeakenedLeftHandSide $ LeftHandSideSingle l
 
 getOutputVars :: GroundsR t -> BaseVars env t' -> OutputVars env t
-getOutputVars TupRunit TupRunit = TupRunit
+getOutputVars TupRunit                           TupRunit                                                                                                         = TupRunit
 getOutputVars (TupRsingle tp@(GroundRscalar t)) (TupRpair (TupRsingle (Var BaseRsignalResolver ix1)) (TupRsingle (Var (BaseRrefWrite t'@(GroundRscalar _)) ix2))) | Refl <- outputSingle tp 
                                                                                                                                                                   , Just Refl <- matchGroundR tp t'
                                                                                                                                                                   = TupRsingle $ OutputScalar t ix2 ix1
 getOutputVars (TupRsingle tp@(GroundRbuffer t)) (TupRpair (TupRsingle (Var BaseRsignalResolver ix1)) (TupRsingle (Var (BaseRrefWrite t'@(GroundRbuffer _)) ix2))) | Just Refl <- matchGroundR tp t'= TupRsingle $ OutputSingleBuffer t ix2 ix1
-getOutputVars (TupRpair g1 g2) (TupRpair v1 v2) = TupRpair (getOutputVars g1 v1) (getOutputVars g2 v2)
+getOutputVars (TupRpair g1 g2)                  (TupRpair v1 v2)                                                                                                  = TupRpair (getOutputVars g1 v1) (getOutputVars g2 v2)
 
 data DeclareLam fenv env' t where
   DeclareLam :: BLeftHandSide (Input t) fenv fenv'
@@ -757,10 +508,10 @@ data DeclareLam fenv env' t where
                -> DeclareLam fenv env' t
 
 declareLam :: FutureEnv' fenv env -> GLeftHandSide t env env' -> DeclareLam fenv env' t
-declareLam env (LeftHandSidePair lhs1 lhs2) | DeclareLam lhs1' env1 <- declareLam env lhs1
-                                            , DeclareLam lhs2' env2 <- declareLam env1 lhs2
-                                            = DeclareLam (LeftHandSidePair lhs1'  lhs2') env2
-declareLam env (LeftHandSideWildcard w) = DeclareLam (LeftHandSideWildcard (inputR w)) env
+declareLam env (LeftHandSidePair lhs1 lhs2)            | DeclareLam lhs1' env1 <- declareLam env lhs1
+                                                       , DeclareLam lhs2' env2 <- declareLam env1 lhs2
+                                                       = DeclareLam (LeftHandSidePair lhs1'  lhs2') env2
+declareLam env (LeftHandSideWildcard w)                = DeclareLam (LeftHandSideWildcard (inputR w)) env
 declareLam env (LeftHandSideSingle (GroundRscalar tp)) | Refl <- inputSingle $ GroundRscalar tp = DeclareLam 
                                                          (LeftHandSideSingle BaseRsignal `LeftHandSidePair` LeftHandSideSingle (BaseRref $ GroundRscalar tp))
                                                          (PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc weakenId)) env) (FutureScalar' tp (RefVar ZeroIdx) (Just (SuccIdx ZeroIdx))))
@@ -773,34 +524,30 @@ getForkedVars a = map (\(EnvBinding ix _) -> Exists (Var undefined ix)) (partial
   where
     go :: UsageOpenAcc op env t -> SyncEnv env
     go (UsageAlet _ _ (Comb _) lhs _ _ a) = environmentDropLHS (go a) lhs
-    go (UsageAlet _ _ Forked lhs _ _ a) = environmentDropLHS (syncEnvUsage a) lhs
+    go (UsageAlet _ _ Forked lhs _ _ a)   = environmentDropLHS (syncEnvUsage a) lhs
 
 directlyWaits :: UniformSchedule kernel env -> [Idx env Signal]
 directlyWaits (Effect (SignalAwait s) a) = s ++ directlyWaits a
-directlyWaits (Alet lhs bnd a) = mapMaybe (strengthenWithLHS lhs) $ directlyWaits a
-directlyWaits _ = []
+directlyWaits (Alet lhs bnd a)           = mapMaybe (strengthenWithLHS lhs) $ directlyWaits a
+directlyWaits _                          = []
 
 directlyWaits' :: UsageOpenAcc op env t -> [Exists (GroundVar env)]
-directlyWaits' (UsageExec _ op args) = map accesToGround (argsVars args)
-directlyWaits' (UsageAlet s _ _ lhs u bnd a) = directlyWaits' bnd -- ++ mapMaybe (\(Exists (Var tp x)) -> Exists . Var tp <$> strengthenWithLHS lhs x) (directlyWaits' a)
-directlyWaits' (UsageAlloc _ _ vs) = flattenTupR $ toGrounds vs
-directlyWaits' (UsageUnit v) = [Exists (toGround v)]
-directlyWaits' (UsageCompute _ e) = expGroundVars e
-directlyWaits' (UsageAcond _ e a1 a2) = Exists (toGround e) : intersect' (directlyWaits' a1) (directlyWaits' a2)
-directlyWaits' _ = []
+directlyWaits' (UsageExec _ op args)         = map accesToGround (argsVars args)
+directlyWaits' (UsageAlet s _ _ lhs u bnd a) = directlyWaits' bnd
+directlyWaits' (UsageAlloc _ _ vs)           = flattenTupR $ toGrounds vs
+directlyWaits' (UsageUnit v)                 = [Exists (toGround v)]
+directlyWaits' (UsageCompute _ e)            = expGroundVars e
+directlyWaits' (UsageAcond _ e a1 a2)        = Exists (toGround e) : intersect' (directlyWaits' a1) (directlyWaits' a2)
+directlyWaits' _                             = []
 
 isTrivial :: UsageOpenAcc op env t -> Bool
---isTrivial UsageAlloc{} = True
---isTrivial UsageUnit{} = True
-isTrivial UsageReturn{} = True
-isTrivial UsageUse{} = True
+isTrivial UsageUse{}         = True
 isTrivial (UsageCompute _ e) = expIsTrivial' e
-isTrivial _ = False
+isTrivial _                  = False
 
 expIsTrivial' :: PreOpenExp arr env t -> Bool
 expIsTrivial' = \case
   Let _ bnd body          -> trav bnd && trav body
-  --Evar{}                  -> True
   Const{}                 -> True
   Undef{}                 -> True
   Pair a b                -> trav a && trav b
@@ -827,8 +574,8 @@ intersect' :: Ord a => [a] -> [a] -> [a]
 intersect' xs ys = go (sort xs) (sort ys)
   where
     go :: Ord a => [a] -> [a] -> [a]
-    go [] _ = []
-    go _ [] = []
+    go []     _      = []
+    go _      []     = []
     go (x:xs) (y:ys) = case compare x y of
                          LT -> go xs (y:ys)
                          EQ -> x : go xs ys
@@ -838,8 +585,8 @@ getLhsVars :: GLeftHandSide bnd env env' -> [Exists (GroundVar env')]
 getLhsVars = snd . go
   where
     go :: GLeftHandSide bnd env env' -> (env :> env', [Exists (GroundVar env')])
-    go (LeftHandSideSingle v) = (weakenSucc weakenId, [Exists (Var v ZeroIdx)])
-    go (LeftHandSideWildcard vs) = (weakenId, [])
+    go (LeftHandSideSingle v)       = (weakenSucc weakenId, [Exists (Var v ZeroIdx)])
+    go (LeftHandSideWildcard vs)    = (weakenId, [])
     go (LeftHandSidePair lhs1 lhs2) = let (k1, vs1) = go lhs1
                                           (k2, vs2) = go lhs2
                                       in (k2 .> k1, weakenExistss k2 vs1 ++ vs2)
@@ -849,52 +596,52 @@ getWriteVars env = mapMaybe go (partialEnvToList env)
   where
     go :: EnvBinding Sync env -> Maybe (Exists (GroundVar env))
     go (EnvBinding ix SyncWrite) = Just $ Exists (Var undefined ix)
-    go _ = Nothing
+    go _                         = Nothing
 
 instance Eq (Exists (GroundVar env')) where
   (Exists (Var x i1)) == (Exists (Var y i2)) = eqIdx i1 i2
 
 eqIdx :: Idx env a -> Idx env a1 -> Bool
-eqIdx ZeroIdx ZeroIdx = True
+eqIdx ZeroIdx       ZeroIdx      = True
 eqIdx (SuccIdx ix) (SuccIdx ix') = eqIdx ix ix'
-eqIdx _ _ = False
+eqIdx _             _            = False
 
 instance Ord (Exists (GroundVar env')) where
   compare (Exists (Var _ i1)) (Exists (Var _ i2)) = compIdx i1 i2
 
 compIdx :: Idx env a -> Idx env a1 -> Ordering
-compIdx ZeroIdx ZeroIdx = EQ
-compIdx (SuccIdx _) ZeroIdx = GT
-compIdx ZeroIdx (SuccIdx _) = LT
+compIdx ZeroIdx ZeroIdx            = EQ
+compIdx (SuccIdx _) ZeroIdx        = GT
+compIdx ZeroIdx (SuccIdx _)        = LT
 compIdx (SuccIdx ix) (SuccIdx ix') = compIdx ix ix'
 
 weakenExistss :: env :> env' -> [Exists (GroundVar env)] -> [Exists (GroundVar env')]
-weakenExistss _ [] = []
+weakenExistss _ []              = []
 weakenExistss k ((Exists v):vs) = Exists (weaken k v) : weakenExistss k vs
 
 getOutput :: OutputVars env' t -> GroundVars env t -> FutureEnv' env' env -> UniformSchedule kernel env'
 getOutput TupRunit TupRunit _ = Return
-getOutput (TupRsingle outputVar) (TupRsingle (Var tp ix)) env = --(TupRpair (TupRpair (TupRsingle (Var BaseRsignalResolver s1)) (TupRsingle (Var BaseRsignalResolver s2))) (TupRsingle dest))
+getOutput (TupRsingle outputVar) (TupRsingle (Var tp ix)) env =
   case prjPartial ix env of
     Nothing -> Return
-    Just (FutureScalar' _ (RefVar ref) (Just signal)) -> useSignals SignalAwait [signal] 
-                                        $ Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
-                                        $ Effect (RefWrite (weaken (weakenSucc weakenId) (Var (BaseRrefWrite tp) (getOutputRef outputVar))) (Var (BaseRground tp) ZeroIdx))
-                                        $ Effect (SignalResolve (map (weakenSucc weakenId >:>) (getOutputSignals outputVar)))
-                                        Return
-    Just (FutureScalar' _ (BndVar ix) signal) -> useSignals SignalAwait (mcons signal [])
-                                        $ Effect (RefWrite (Var (BaseRrefWrite tp) (getOutputRef outputVar)) (Var (BaseRground tp) ix))
-                                        $ Effect (SignalResolve (getOutputSignals outputVar))
-                                        Return
+    Just (FutureScalar' _ (RefVar ref) (Just signal)) ->         useSignals SignalAwait [signal] 
+                                                               $ Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
+                                                               $ Effect (RefWrite (weaken (weakenSucc weakenId) (Var (BaseRrefWrite tp) (getOutputRef outputVar))) (Var (BaseRground tp) ZeroIdx))
+                                                               $ Effect (SignalResolve (map (weakenSucc weakenId >:>) (getOutputSignals outputVar)))
+                                                                 Return
+    Just (FutureScalar' _ (BndVar ix) signal) ->                 useSignals SignalAwait (mcons signal [])
+                                                               $ Effect (RefWrite (Var (BaseRrefWrite tp) (getOutputRef outputVar)) (Var (BaseRground tp) ix))
+                                                               $ Effect (SignalResolve (getOutputSignals outputVar))
+                                                                 Return
     Just (FutureBuffer' _ (RefVar ref) (Lock wait resolve) _) -> useSignals SignalAwait (mcons wait [])
-                                          $ Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
-                                          $ Effect (RefWrite (weaken (weakenSucc weakenId) (Var (BaseRrefWrite tp) (getOutputRef outputVar))) (Var (BaseRground tp) ZeroIdx))
-                                          $ Effect (SignalResolve (map (weakenSucc weakenId >:>) (mcons resolve (getOutputSignals outputVar))))
-                                          Return
-    Just (FutureBuffer' _ (BndVar ix) (Lock wait resolve) _) -> useSignals SignalAwait (mcons wait [])
-                                          $ Effect (RefWrite (Var (BaseRrefWrite tp) (getOutputRef outputVar)) (Var (BaseRground tp) ix))
-                                          $ Effect (SignalResolve (mcons resolve (getOutputSignals outputVar)))
-                                          Return
+                                                               $ Alet (LeftHandSideSingle $ BaseRground tp) (RefRead (Var (BaseRref tp) ref))
+                                                               $ Effect (RefWrite (weaken (weakenSucc weakenId) (Var (BaseRrefWrite tp) (getOutputRef outputVar))) (Var (BaseRground tp) ZeroIdx))
+                                                               $ Effect (SignalResolve (map (weakenSucc weakenId >:>) (mcons resolve (getOutputSignals outputVar))))
+                                                                 Return
+    Just (FutureBuffer' _ (BndVar ix) (Lock wait resolve) _) ->  useSignals SignalAwait (mcons wait [])
+                                                               $ Effect (RefWrite (Var (BaseRrefWrite tp) (getOutputRef outputVar)) (Var (BaseRground tp) ix))
+                                                               $ Effect (SignalResolve (mcons resolve (getOutputSignals outputVar)))
+                                                                 Return
 getOutput (TupRpair t1 t2) (TupRpair v1 v2) env = let 
                                s1 = getOutput t1 v1 env
                                s2 = getOutput t2 v2 env
@@ -905,6 +652,13 @@ getOutput (TupRpair t1 t2) (TupRpair v1 v2) env = let
                               maybeFork s Return = s
                               maybeFork s1 s2 = Fork s1 s2
 
+isBinding :: UsageOpenAcc op env t -> Bool
+isBinding UsageCompute{} = True
+isBinding UsageAlloc{}   = True
+isBinding UsageUse{}     = True
+isBinding UsageUnit{}    = True
+isBinding _              = False
+
 data FromUsageBinding env t where
   FromUsageBinding :: [Exists (GroundVar env)]
                    -> GroundsR t
@@ -912,46 +666,46 @@ data FromUsageBinding env t where
                    -> FromUsageBinding env t
 
 fromUsageBinding :: forall t op env. UsageOpenAcc op env t -> FromUsageBinding env t
-fromUsageBinding (UsageCompute _ e) = FromUsageBinding (expGroundVars e) (mapTupR GroundRscalar $ expType e) f
-                                  where
-                                    f :: env :?> fenv -> Maybe (Binding fenv t)
-                                    f k = Compute <$> strengthenArrayInstr k e
-fromUsageBinding (UsageAlloc sh tp n) = FromUsageBinding (expVarsList n) (TupRsingle $ GroundRbuffer tp) f
-                                     where
-                                       f :: env :?> fenv -> Maybe (Binding fenv t)
-                                       f k = Alloc sh tp <$> strengthenVars k n
-fromUsageBinding (UsageUse tp n b) = FromUsageBinding [] (TupRsingle $ GroundRbuffer tp) f
-                                  where
-                                    f :: env :?> fenv -> Maybe (Binding fenv t)
-                                    f _ = Just (Use tp n b)
+fromUsageBinding (UsageCompute _ e)        = FromUsageBinding (expGroundVars e) (mapTupR GroundRscalar $ expType e) f
+                                           where
+                                             f :: env :?> fenv -> Maybe (Binding fenv t)
+                                             f k = Compute <$> strengthenArrayInstr k e
+fromUsageBinding (UsageAlloc sh tp n)      = FromUsageBinding (expVarsList n) (TupRsingle $ GroundRbuffer tp) f
+                                           where
+                                             f :: env :?> fenv -> Maybe (Binding fenv t)
+                                             f k = Alloc sh tp <$> strengthenVars k n
+fromUsageBinding (UsageUse tp n b)         = FromUsageBinding [] (TupRsingle $ GroundRbuffer tp) f
+                                           where
+                                             f :: env :?> fenv -> Maybe (Binding fenv t)
+                                             f _ = Just (Use tp n b)
 fromUsageBinding (UsageUnit e@(Var tp ix)) = FromUsageBinding [Exists (mapVar GroundRscalar e)] (TupRsingle $ GroundRbuffer tp) f
-                               where
-                                 f :: env :?> fenv -> Maybe (Binding fenv t)
-                                 f k = Unit . Var tp <$> k ix
-fromUsageBinding x = undefined
+                                           where
+                                             f :: env :?> fenv -> Maybe (Binding fenv t)
+                                             f k = Unit . Var tp <$> k ix
+fromUsageBinding x                         = undefined
 
 fromUsageBinding' :: IsKernel kernel => OutputVars env' t -> [Exists (GroundVar env)] -> GroundsR t -> (forall fenv. env :?> fenv -> Maybe (Binding fenv t)) -> FutureEnv' env' env -> UniformSchedule kernel env'
-fromUsageBinding' outputVars used grnds f env | Reads' reEnv k waits resolves reads <- readVars (partialEnvFromVarsList used) env,
-                                           DeclareVars lhs k' value <- declareVars $ mapTupR BaseRground grnds,
-                                           Just bnd <- f (reEnvIdx' reEnv),
-                                           write <- bindOutput (mapTupR (weaken (k' .> k)) outputVars) (value weakenId)
-                                          = useSignals SignalAwait waits
-                                            $ reads
-                                            $ Alet lhs bnd
-                                            $ useSignals SignalResolve (map (weaken (k' .> k)) resolves)
-                                            write
+fromUsageBinding' outputVars used grnds f env | Reads' reEnv k waits resolves reads <- readVars (partialEnvFromVarsList used) env
+                                              , DeclareVars lhs k' value <- declareVars $ mapTupR BaseRground grnds
+                                              , Just bnd <- f (reEnvIdx' reEnv)
+                                              , write <- bindOutput (mapTupR (weaken (k' .> k)) outputVars) (value weakenId)
+                                              = useSignals SignalAwait waits
+                                              $ reads
+                                              $ Alet lhs bnd
+                                              $ useSignals SignalResolve (map (weaken (k' .> k)) resolves)
+                                              write
 
 useSignals :: ([Idx env s] -> Effect kernel env) -> [Idx env s] -> (UniformSchedule kernel env -> UniformSchedule kernel env)
 useSignals _ [] = id
-useSignals f s = Effect (f s)
+useSignals f s  = Effect (f s)
 
 bindOutput :: OutputVars env' t -> BaseVars env' t -> UniformSchedule kernel env'
 bindOutput outputVars vars = go outputVars vars Return
   where 
     go :: OutputVars env' t -> BaseVars env' t -> UniformSchedule kernel env' -> UniformSchedule kernel env'
-    go TupRunit TupRunit = id
+    go TupRunit                TupRunit                                = id
     go (TupRsingle outputVar) (TupRsingle v@(Var (BaseRground tp) ix)) = Effect (RefWrite (Var (BaseRrefWrite tp) (getOutputRef outputVar)) v) . Effect (SignalResolve (getOutputSignals outputVar))
-    go (TupRpair o1 o2) (TupRpair v1 v2) = go o1 v1 . go o2 v2
+    go (TupRpair o1 o2)       (TupRpair v1 v2)                         = go o1 v1 . go o2 v2
 
 data DeclareLet kernel fenv env env' t where
   DeclareLet :: fenv :> fenv'
@@ -962,53 +716,53 @@ data DeclareLet kernel fenv env env' t where
              -> DeclareLet kernel fenv env env' t
 
 declareLet :: GLeftHandSide t env env' -> Uniquenesses t -> DeclareLet kernel fenv env env' t --(fenv :> fenv', UniformSchedule kernel fenv' -> UniformSchedule kernel fenv, BaseVars fenv (Output t), FutureEnv fenv env')
-declareLet (LeftHandSidePair lhs1 lhs2) (TupRpair u1 u2) | DeclareLet k1 instr1 output1 env1 s1 <- declareLet lhs1 u1
-                                                             , DeclareLet k2 instr2 output2 env2 s2 <- declareLet lhs2 u2
-                                                             = DeclareLet (k2 .> k1) (instr1 . instr2) (TupRpair (mapTupR (weaken k2) output1) output2) (env2 . env1) (map (weaken k2) s1 ++ s2)
-declareLet (LeftHandSideWildcard TupRunit) TupRunit = DeclareLet weakenId id TupRunit id []
-declareLet (LeftHandSideWildcard _) _ = DeclareLet weakenId id (TupRsingle OutputEmpty) id []
-declareLet (LeftHandSideSingle t@(GroundRscalar tp)) _ = DeclareLet
-                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
-                                                            (Alet lhsSignal NewSignal
-                                                            . Alet (lhsRef $ GroundRscalar tp) (NewRef $ GroundRscalar tp))
-                                                            (TupRsingle (OutputScalar tp idx0 idx2))  --(TupRpair (TupRpair undefined (TupRsingle (Var BaseRsignalResolver idx2))) (TupRsingle (Var (BaseRrefWrite $ GroundRscalar tp) idx0)))
-                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
-                                                            $ FutureScalar' tp (RefVar idx1) (Just idx3))
-                                                            [idx3]
-                                                          where
-                                                            idx0 = ZeroIdx
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-declareLet (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Unique) = DeclareLet
-                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
-                                                            (Alet lhsSignal NewSignal
-                                                            . Alet lhsSignal NewSignal
-                                                            . Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp))
-                                                            (TupRsingle (OutputBuffer tp idx0 idx2 idx4)) --(TupRpair (TupRpair (TupRsingle (Var BaseRsignalResolver idx2)) (TupRsingle (Var BaseRsignalResolver idx4))) (TupRsingle (Var (BaseRrefWrite $ GroundRbuffer tp) idx0)))
-                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
-                                                            $ FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) (Just (Lock (Just idx5) Nothing)))
-                                                            [idx3, idx5]
-                                                          where
-                                                            idx0 = ZeroIdx
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-                                                            idx4 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-                                                            idx5 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-declareLet (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Shared) = DeclareLet
-                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
-                                                            (Alet lhsSignal NewSignal
-                                                            . Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp))
-                                                            (TupRsingle (OutputSingleBuffer tp idx0 idx2)) --(TupRpair (TupRpair (TupRsingle (Var BaseRsignalResolver idx2)) (TupRsingle (Var BaseRsignalResolver idx4))) (TupRsingle (Var (BaseRrefWrite $ GroundRbuffer tp) idx0)))
-                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
-                                                            $ FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) Nothing)
-                                                            [idx3]
-                                                          where
-                                                            idx0 = ZeroIdx
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareLet (LeftHandSidePair lhs1 lhs2)              (TupRpair u1 u2)     | DeclareLet k1 instr1 output1 env1 s1 <- declareLet lhs1 u1
+                                                                          , DeclareLet k2 instr2 output2 env2 s2 <- declareLet lhs2 u2
+                                                                          = DeclareLet (k2 .> k1) (instr1 . instr2) (TupRpair (mapTupR (weaken k2) output1) output2) (env2 . env1) (map (weaken k2) s1 ++ s2)
+declareLet (LeftHandSideWildcard TupRunit)           TupRunit             = DeclareLet weakenId id TupRunit id []
+declareLet (LeftHandSideWildcard _)                  _                    = DeclareLet weakenId id (TupRsingle OutputEmpty) id []
+declareLet (LeftHandSideSingle t@(GroundRscalar tp)) _                    = DeclareLet
+                                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
+                                                                            (Alet lhsSignal NewSignal
+                                                                          .  Alet (lhsRef $ GroundRscalar tp) (NewRef $ GroundRscalar tp))
+                                                                            (TupRsingle (OutputScalar tp idx0 idx2))  --(TupRpair (TupRpair undefined (TupRsingle (Var BaseRsignalResolver idx2))) (TupRsingle (Var (BaseRrefWrite $ GroundRscalar tp) idx0)))
+                                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
+                                                                          $ FutureScalar' tp (RefVar idx1) (Just idx3))
+                                                                            [idx3]
+                                                                          where
+                                                                            idx0 = ZeroIdx
+                                                                            idx1 = SuccIdx ZeroIdx
+                                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
+                                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareLet (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Unique)  = DeclareLet
+                                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
+                                                                            (Alet lhsSignal NewSignal
+                                                                          .  Alet lhsSignal NewSignal
+                                                                          .  Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp))
+                                                                            (TupRsingle (OutputBuffer tp idx0 idx2 idx4)) --(TupRpair (TupRpair (TupRsingle (Var BaseRsignalResolver idx2)) (TupRsingle (Var BaseRsignalResolver idx4))) (TupRsingle (Var (BaseRrefWrite $ GroundRbuffer tp) idx0)))
+                                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
+                                                                          $ FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) (Just (Lock (Just idx5) Nothing)))
+                                                                            [idx3, idx5]
+                                                                          where
+                                                                            idx0 = ZeroIdx
+                                                                            idx1 = SuccIdx ZeroIdx
+                                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
+                                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+                                                                            idx4 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+                                                                            idx5 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareLet (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Shared)  = DeclareLet
+                                                                            (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)
+                                                                            (Alet lhsSignal NewSignal
+                                                                          .  Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp))
+                                                                            (TupRsingle (OutputSingleBuffer tp idx0 idx2)) --(TupRpair (TupRpair (TupRsingle (Var BaseRsignalResolver idx2)) (TupRsingle (Var BaseRsignalResolver idx4))) (TupRsingle (Var (BaseRrefWrite $ GroundRbuffer tp) idx0)))
+                                                                            (\env -> PPush (mapPartialEnv (weaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId)) env)
+                                                                          $ FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) Nothing)
+                                                                            [idx3]
+                                                                          where
+                                                                            idx0 = ZeroIdx
+                                                                            idx1 = SuccIdx ZeroIdx
+                                                                            idx2 = SuccIdx $ SuccIdx ZeroIdx
+                                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
 
 data DeclareCombLet fenv env env' where
   DeclareCombLet :: (FutureEnv' fenv env -> FutureEnv' fenv env')
@@ -1021,33 +775,33 @@ data FutureWeaken kernel fenv t where
                -> FutureWeaken kernel fenv t
 
 declareCombLet :: Int -> FutureEnv' fenv env -> GLeftHandSide t env env' -> Uniquenesses t -> FutureEnv' fenv env' --(fenv :> fenv', UniformSchedule kernel fenv' -> UniformSchedule kernel fenv, BaseVars fenv (Output t), FutureEnv fenv env')
-declareCombLet i env (LeftHandSidePair lhs1 lhs2) (TupRpair u1 u2) | env1 <- declareCombLet i env lhs1 u1
-                                                             , env2 <- declareCombLet i env1 lhs2 u2
-                                                             = env2
-declareCombLet i env (LeftHandSideWildcard _) _ = env
-declareCombLet i env (LeftHandSideSingle t@(GroundRscalar tp)) _ = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
-                                                                   (FutureScalar' tp (RefVar idx1) (Just idx3))
-                                                                   (Alet lhsSignal NewSignal
-                                                                   . Alet (lhsRef $ GroundRscalar tp) (NewRef $ GroundRscalar tp)))
-                                                          where
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-declareCombLet i env (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Unique) = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
-                                                                                     (FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) (Just (Lock (Just idx5) Nothing)))
-                                                                                     (Alet lhsSignal NewSignal
-                                                                                     . Alet lhsSignal NewSignal
-                                                                                     . Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp)))
-                                                          where
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-                                                            idx5 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
-declareCombLet i env (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Shared) = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
-                                                                                     (FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) Nothing)
-                                                                                     (Alet lhsSignal NewSignal
-                                                                                     . Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp)))
-                                                          where
-                                                            idx1 = SuccIdx ZeroIdx
-                                                            idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareCombLet i env (LeftHandSidePair lhs1 lhs2)              (TupRpair u1 u2)     | env1 <- declareCombLet i env lhs1 u1
+                                                                                    , env2 <- declareCombLet i env1 lhs2 u2
+                                                                                    = env2
+declareCombLet i env (LeftHandSideWildcard _)                  _                    = env
+declareCombLet i env (LeftHandSideSingle t@(GroundRscalar tp)) _                    = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
+                                                                                      (FutureScalar' tp (RefVar idx1) (Just idx3))
+                                                                                      (Alet lhsSignal NewSignal
+                                                                                    .  Alet (lhsRef $ GroundRscalar tp) (NewRef $ GroundRscalar tp)))
+                                                                                    where
+                                                                                      idx1 = SuccIdx ZeroIdx
+                                                                                      idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareCombLet i env (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Unique)  = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
+                                                                                      (FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) (Just (Lock (Just idx5) Nothing)))
+                                                                                      (Alet lhsSignal NewSignal
+                                                                                    .  Alet lhsSignal NewSignal
+                                                                                    .  Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp)))
+                                                                                    where
+                                                                                      idx1 = SuccIdx ZeroIdx
+                                                                                      idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+                                                                                      idx5 = SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
+declareCombLet i env (LeftHandSideSingle t@(GroundRbuffer tp)) (TupRsingle Shared)  = PPush env $ FutureDelayed i undefined (\_ -> FutureWeaken (weakenSucc $ weakenSucc $ weakenSucc $ weakenSucc weakenId) 
+                                                                                      (FutureBuffer' tp (RefVar idx1) (Lock (Just idx3) Nothing) Nothing)
+                                                                                      (Alet lhsSignal NewSignal
+                                                                                    .  Alet (lhsRef $ GroundRbuffer tp) (NewRef $ GroundRbuffer tp)))
+                                                                                    where
+                                                                                      idx1 = SuccIdx ZeroIdx
+                                                                                      idx3 = SuccIdx $ SuccIdx $ SuccIdx ZeroIdx
 
 data AddVars fenv env' t where
   AddVars :: fenv :> fenv'
@@ -1056,36 +810,34 @@ data AddVars fenv env' t where
           -> AddVars fenv env' t
 
 addVars :: GLeftHandSide t env env' -> FutureEnv' fenv env -> Uniquenesses t -> AddVars fenv env' t
-addVars (LeftHandSideWildcard t) env _ = AddVars weakenId env (LeftHandSideWildcard (mapTupR BaseRground t))
-addVars (LeftHandSideSingle (GroundRscalar tp)) env _ = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) $ FutureScalar' tp (BndVar ZeroIdx) Nothing) (LeftHandSideSingle (BaseRground (GroundRscalar tp)))
-addVars (LeftHandSideSingle (GroundRbuffer tp)) env (TupRsingle Unique) = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) $ FutureBuffer' tp (BndVar ZeroIdx) (Lock Nothing Nothing) (Just (Lock Nothing Nothing))) (LeftHandSideSingle (BaseRground (GroundRbuffer tp)))
-addVars (LeftHandSideSingle (GroundRbuffer tp)) env (TupRsingle Shared) = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) $ FutureBuffer' tp (BndVar ZeroIdx) (Lock Nothing Nothing) Nothing) (LeftHandSideSingle (BaseRground (GroundRbuffer tp)))
-addVars (LeftHandSidePair lhs1 lhs2) env (TupRpair u1 u2) | AddVars k1 env1 lhs1' <- addVars lhs1 env u1
-                                                          , AddVars k2 env2 lhs2' <- addVars lhs2 env1 u2
-                                                          = AddVars (k2 .> k1) env2 (LeftHandSidePair lhs1' lhs2')
+addVars (LeftHandSideWildcard t)                env  _                  = AddVars weakenId env (LeftHandSideWildcard (mapTupR BaseRground t))
+addVars (LeftHandSideSingle (GroundRscalar tp)) env  _                  = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) 
+                                                                        $ FutureScalar' tp (BndVar ZeroIdx) Nothing) (LeftHandSideSingle (BaseRground (GroundRscalar tp)))
+addVars (LeftHandSideSingle (GroundRbuffer tp)) env (TupRsingle Unique) = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) 
+                                                                        $ FutureBuffer' tp (BndVar ZeroIdx) (Lock Nothing Nothing) (Just (Lock Nothing Nothing))) (LeftHandSideSingle (BaseRground (GroundRbuffer tp)))
+addVars (LeftHandSideSingle (GroundRbuffer tp)) env (TupRsingle Shared) = AddVars (weakenSucc weakenId) (PPush (mapPartialEnv (weaken (weakenSucc weakenId)) env) 
+                                                                        $ FutureBuffer' tp (BndVar ZeroIdx) (Lock Nothing Nothing) Nothing) (LeftHandSideSingle (BaseRground (GroundRbuffer tp)))
+addVars (LeftHandSidePair lhs1 lhs2)            env (TupRpair u1 u2)    | AddVars k1 env1 lhs1' <- addVars lhs1 env u1
+                                                                        , AddVars k2 env2 lhs2' <- addVars lhs2 env1 u2
+                                                                        = AddVars (k2 .> k1) env2 (LeftHandSidePair lhs1' lhs2')
 
 getWriteResolve :: FutureEnv' fenv env -> Exists (Var AccessGroundR env) -> Maybe (Idx fenv SignalResolver)
 getWriteResolve env (Exists (Var (AccessGroundRbuffer mod tp) ix)) = case mod of
-                                                                      In -> Nothing
-                                                                      _  -> case prjPartial ix env of
-                                                                              Nothing -> undefined
-                                                                              Just (FutureBuffer' _ _ _ (Just (Lock _ write))) -> write
-                                                                              _ -> Nothing
-getWriteResolve _ _ = Nothing
+                                                                       In -> Nothing
+                                                                       _  -> case prjPartial ix env of
+                                                                               Nothing                                          -> undefined
+                                                                               Just (FutureBuffer' _ _ _ (Just (Lock _ write))) -> write
+                                                                               _                                                -> Nothing
+getWriteResolve _   _                                              = Nothing
 
 accesToGround :: Exists (Var AccessGroundR env) -> Exists (Var GroundR env)
-accesToGround (Exists (Var (AccessGroundRscalar tp) ix)) = Exists (Var (GroundRscalar tp) ix)
+accesToGround (Exists (Var (AccessGroundRscalar tp)   ix)) = Exists (Var (GroundRscalar tp) ix)
 accesToGround (Exists (Var (AccessGroundRbuffer _ tp) ix)) = Exists (Var (GroundRbuffer tp) ix)
 
 combineFork :: UniformSchedule kernel env -> UniformSchedule kernel env -> UniformSchedule kernel env
-combineFork a (Fork a1 a2) = Fork (serial [a, a1]) a2
-combineFork a (Effect e a1) = Effect e (combineFork a a1)
+combineFork a (Fork a1 a2)      = Fork (serial [a, a1]) a2
+combineFork a (Effect e a1)     = Effect e (combineFork a a1)
 combineFork a (Alet lhs bnd a1) = Alet lhs bnd (combineFork (weaken' (weakenWithLHS lhs) a) a1)
-
--- combineFork' :: env :> env' -> (UniformSchedule kernel env' -> UniformSchedule kernel env) -> UniformSchedule kernel env' -> UniformSchedule kernel env
--- combineFork' k a (Fork a1 a2) = Fork (a a1) a2
--- combineFork' k a (Effect e a1) = Effect e (combineFork' k a a1)
--- combineFork' k a (Alet lhs bnd a1) = Alet lhs bnd (combineFork' k (weaken' (weakenWithLHS lhs) a) a1)
 
 data Reads' kernel genv fenv where
   Reads' :: ReEnv' genv fenv'
@@ -1095,29 +847,29 @@ data Reads' kernel genv fenv where
         -> (UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
         -> Reads' kernel genv fenv
 
-readVars :: PartialEnv (Var GroundR env) env' -> FutureEnv' fenv env -> Reads' kernel env' fenv --(ReEnv' env fenv', fenv :> fenv', UniformSchedule kernel fenv' -> UniformSchedule kernel fenv)
+readVars :: PartialEnv (Var GroundR env) env' -> FutureEnv' fenv env -> Reads' kernel env' fenv
 readVars PEnd env = Reads' ReEnvEnd' weakenId [] [] id
 readVars (PPush vars (Var tp ix)) env | Reads' reEnv k waits resolves reads <- readVars vars env
-                                           = case prjPartial ix env of
-                                               Nothing -> undefined
-                                               Just (FutureScalar' _ (BndVar ix) Nothing) -> Reads' (ReEnvId' (weaken k ix) reEnv) k waits resolves reads
-                                               Just (FutureBuffer' _ (BndVar ix) _ _) -> Reads' (ReEnvId' (weaken k ix) reEnv) k waits resolves reads
-                                               Just (FutureScalar' _ (RefVar ref) s) -> Reads' (ReEnvKeep' reEnv) (weakenSucc' k) (mcons s waits) resolves (reads . Alet (LeftHandSideSingle (BaseRground tp)) (RefRead (Var (BaseRref tp) (weaken k ref))))
-                                               Just (FutureBuffer' _ (RefVar ref) (Lock w1 r1) write) -> Reads' (ReEnvKeep' reEnv) (weakenSucc' k) (mcons w1 $ getWriteWait write ++ waits) (mcons r1 $ getResolves write ++ resolves) (reads . Alet (LeftHandSideSingle (BaseRground tp)) (RefRead (Var (BaseRref tp) (weaken k ref))))
-                                           where
-                                            getResolves :: Maybe (Lock' env) -> [Idx env SignalResolver]
-                                            getResolves (Just (Lock _ (Just s))) = [s]
-                                            getResolves _ = []
+                                      = case prjPartial ix env of
+                                          Nothing -> undefined
+                                          Just (FutureScalar' _ (BndVar ix) Nothing) -> Reads' (ReEnvId' (weaken k ix) reEnv) k waits resolves reads
+                                          Just (FutureBuffer' _ (BndVar ix) _ _) -> Reads' (ReEnvId' (weaken k ix) reEnv) k waits resolves reads
+                                          Just (FutureScalar' _ (RefVar ref) s) -> Reads' (ReEnvKeep' reEnv) (weakenSucc' k) (mcons s waits) resolves (reads . Alet (LeftHandSideSingle (BaseRground tp)) (RefRead (Var (BaseRref tp) (weaken k ref))))
+                                          Just (FutureBuffer' _ (RefVar ref) (Lock w1 r1) write) -> Reads' (ReEnvKeep' reEnv) (weakenSucc' k) (mcons w1 $ getWriteWait write ++ waits) (mcons r1 $ getResolves write ++ resolves) (reads . Alet (LeftHandSideSingle (BaseRground tp)) (RefRead (Var (BaseRref tp) (weaken k ref))))
+                                      where
+                                      getResolves :: Maybe (Lock' env) -> [Idx env SignalResolver]
+                                      getResolves (Just (Lock _ (Just s))) = [s]
+                                      getResolves _ = []
 
-                                            getWriteWait :: Maybe (Lock' env) -> [Idx env Signal]
-                                            getWriteWait (Just (Lock (Just l) _)) = [l]
-                                            getWriteWait _ = []
-readVars (PNone vars) env | Reads' reEnv k waits resolves reads <- readVars vars env
-                          = Reads' (ReEnvSkip' reEnv) k waits resolves reads
+                                      getWriteWait :: Maybe (Lock' env) -> [Idx env Signal]
+                                      getWriteWait (Just (Lock (Just l) _)) = [l]
+                                      getWriteWait _ = []
+readVars (PNone vars)             env | Reads' reEnv k waits resolves reads <- readVars vars env
+                                      = Reads' (ReEnvSkip' reEnv) k waits resolves reads
 
 mcons :: Maybe a -> [a] -> [a]
 mcons (Just x) xs = x : xs
-mcons Nothing xs = xs
+mcons Nothing  xs = xs
 
 partialEnvFromVarsList :: [Exists (Var GroundR env)] -> PartialEnv (Var GroundR env) env
 partialEnvFromVarsList vars = partialEnvFromList const $ map go vars
@@ -1135,9 +887,9 @@ instance Sink' Lock' where
 
 data Future' fenv t where
   FutureScalar' :: ScalarType t
-               -> VarIdx fenv t
-               -> Maybe (Idx fenv Signal)
-               -> Future' fenv t
+                -> VarIdx fenv t
+                -> Maybe (Idx fenv Signal)
+                -> Future' fenv t
 
   -- A buffer has a signal to denote that the Ref may be read,
   -- and signals and resolvers grouped in Locks to synchronize
@@ -1152,10 +904,10 @@ data Future' fenv t where
   --  - The write resolver may only be resolved after both
   --    the read and write signals are resolved.
   FutureBuffer' :: ScalarType t
-               -> VarIdx fenv (Buffer t)
-               -> Lock' fenv -- Read access
-               -> Maybe (Lock' fenv) -- Write access, if needed
-               -> Future' fenv (Buffer t)
+                -> VarIdx fenv (Buffer t)
+                -> Lock' fenv -- Read access
+                -> Maybe (Lock' fenv) -- Write access, if needed
+                -> Future' fenv (Buffer t)
 
   FutureDelayed :: Int
                 -> fenv :> fenv'
@@ -1165,7 +917,6 @@ data Future' fenv t where
 instance Sink Future' where
   weaken k (FutureScalar' tp v s) = FutureScalar' tp (weaken k v) (weaken k <$> s)
   weaken k (FutureBuffer' tp v read write) = FutureBuffer' tp (weaken k v) (weaken' k read) (weaken' k <$> write)
-  --weaken k (FutureDelayed i k' f) = FutureDelayed i _ f
 
 data VarIdx env t where
   RefVar :: Idx env (Ref t)
@@ -1242,8 +993,8 @@ sub' fenv senv body = forks (body fenv' : actions)
   where
     (fenv', actions) = subFutureEnvironment' fenv senv
 
-fromUsageSub :: IsKernel kernel => FutureEnv' fenv genv -> OutputVars fenv t -> [CombineAcc kernel genv] -> UsageOpenAcc (Cluster (KernelOperation kernel)) genv t -> UniformSchedule kernel fenv
-fromUsageSub env outputVars waits a = sub' env (syncEnvUsage a) (\fenv -> fromUsage outputVars fenv waits a)
+fromUsageSub :: IsKernel kernel => FutureEnv' fenv genv -> OutputVars fenv t -> UsageOpenAcc (Cluster (KernelOperation kernel)) genv t -> UniformSchedule kernel fenv
+fromUsageSub env outputVars a = sub' env (syncEnvUsage a) (\fenv -> fromUsage outputVars fenv a)
 
 -- Implementation of the sub-environment rule, by restricting the futures
 -- in the FutureEnv to the abilities required by the SyncEnv.
@@ -1294,8 +1045,8 @@ subLet fenv senv body = body fenv'
   where
     fenv' = subFutureEnvironmentLet fenv senv
 
-fromUsageSubLet :: IsKernel kernel => OutputVars fenv t -> FutureEnv' fenv genv -> [CombineAcc kernel genv] -> UsageOpenAcc (Cluster (KernelOperation kernel)) genv t -> UniformSchedule kernel fenv
-fromUsageSubLet outputVars env waits a = subLet env (syncEnvUsage a) (\fenv -> fromUsage outputVars fenv waits a)
+fromUsageSubLet :: IsKernel kernel => OutputVars fenv t -> FutureEnv' fenv genv -> UsageOpenAcc (Cluster (KernelOperation kernel)) genv t -> UniformSchedule kernel fenv
+fromUsageSubLet outputVars env a = subLet env (syncEnvUsage a) (\fenv -> fromUsage outputVars fenv a)
 
 -- Data type for the existentially qualified type variable fenv' used in chainFuture
 data ChainFutureEnv' kernel fenv genv where
@@ -1679,7 +1430,6 @@ fromUsageWhile outputVars env (UsageAwhile s u guardFun@(UsageAlam lhsg (UsageAb
               -- reference
               --(TupRsingle (Var BaseRsignalResolver $ SuccIdx $ SuccIdx ZeroIdx) `TupRpair` TupRsingle (Var (BaseRrefWrite $ GroundRscalar scalarType) ZeroIdx))
               (TupRsingle $ OutputScalar scalarType ZeroIdx (SuccIdx $ SuccIdx ZeroIdx))
-              []
               guard
           , -- Wait on signal of condition
             Effect (SignalAwait [SuccIdx $ SuccIdx $ SuccIdx ZeroIdx])
@@ -1707,7 +1457,6 @@ fromUsageWhile outputVars env (UsageAwhile s u guardFun@(UsageAlam lhsg (UsageAb
                   -- Write to the destinations passed in the output argument
                   -- (lhsOutput).
                   (mapTupR (weaken (weakenSucc' $ weakenSucc' $ weakenSucc' $ weakenSucc' $ weakenSucc' $ k5 .> k4)) outputVars'')
-                  []
                   body
               )
               ( -- Condition is false. The loop should not continue. We must
@@ -2535,6 +2284,15 @@ loopFuture' _ k01 future left right
     isScalar
       | FutureScalar'{} <- future = True
       | otherwise = False
+
+
+
+
+
+
+
+
+
 
 rnfSchedule' :: IsKernel kernel => UniformSchedule kernel env -> ()
 rnfSchedule' Return                        = ()
